@@ -6,6 +6,20 @@ export type ForecastStep = {
   trend: number;
 };
 
+export type AIChatMessage = {
+  role: "system" | "user" | "assistant";
+  content: string;
+};
+
+export type GeocodeResult = {
+  name: string;
+  name_bn?: string | null;
+  name_en?: string | null;
+  lat: number;
+  lon: number;
+  source?: string;
+};
+
 export type RiskPoint = {
   name: string;
   lat: number;
@@ -31,4 +45,10 @@ export type RiskGridResponse = {
   country_focus: string;
   source: string[];
   items: RiskPoint[];
+};
+
+export type BoundaryResponse = {
+  country: Record<string, unknown>;
+  districts: Record<string, unknown>;
+  upazilas: Record<string, unknown>;
 };

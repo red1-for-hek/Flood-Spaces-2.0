@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, Bell, Bot, Clock3, LocateFixed, RefreshCw, Search } from "lucide-react";
-import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Bar, CartesianGrid, ComposedChart, Legend as ChartLegend, Line, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import MapPanel from "./components/MapPanel";
 import {
+  fetchAiChat,
   fetchAiSummary,
   fetchAreaGrid,
   fetchBoundaries,
@@ -12,7 +13,7 @@ import {
   runAlertCheck,
   subscribeTelegram
 } from "./lib/api";
-import type { RiskPoint } from "./types";
+import type { GeocodeResult, RiskPoint } from "./types";
 
 const bdEmergencyContacts = [
   { name: "National Emergency", value: "999" },
@@ -22,6 +23,27 @@ const bdEmergencyContacts = [
 
 function levelClass(level: RiskPoint["risk_level"]) {
   return `risk risk-${level}`;
+}
+
+function formatForecastLabel(time: string): string {
+  const parsed = new Date(time);
+  if (Number.isNaN(parsed.getTime())) {
+    return time;
+  }
+  return parsed.toLocaleDateString(undefined, { weekday: "short", day: "numeric" });
+}
+
+function trendBand(trend: number): "low" | "moderate" | "high" | "severe" {
+  if (trend < 30) {
+    return "low";
+  }
+  if (trend < 55) {
+    return "moderate";
+  }
+  if (trend < 75) {
+    return "high";
+  }
+  return "severe";
 }
 
 function fallbackPoints(): RiskPoint[] {
@@ -61,9 +83,17 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [aiSummary, setAiSummary] = useState("Select a zone to generate AI explanation.");
+  const [aiMode, setAiMode] = useState<"analysis" | "chat">("analysis");
+  const [chatMessages, setChatMessages] = useState<Array<{ role: "assistant" | "user"; content: string }>>([
+    { role: "assistant", content: "Ask anything about flood risk, weather, search, alerts, or Bangladesh map usage." }
+  ]);
+  const [chatInput, setChatInput] = useState("");
+  const [chatStatus, setChatStatus] = useState("");
   const [mapMode, setMapMode] = useState<"risk" | "rain" | "wind">("risk");
   const [countryBoundary, setCountryBoundary] = useState<Record<string, unknown> | null>(null);
   const [districtBoundaries, setDistrictBoundaries] = useState<Record<string, unknown> | null>(null);
+  const [upazilaBoundaries, setUpazilaBoundaries] = useState<Record<string, unknown> | null>(null);
+  const [locationAccuracyMeters, setLocationAccuracyMeters] = useState<number | null>(null);
 
   const [chatId, setChatId] = useState("");
   const [threshold, setThreshold] = useState(70);
@@ -71,6 +101,7 @@ export default function App() {
   const [alertStatus, setAlertStatus] = useState("");
   const [searchText, setSearchText] = useState("Dhaka, Bangladesh");
   const [searchStatus, setSearchStatus] = useState("");
+  const [searchResults, setSearchResults] = useState<GeocodeResult[]>([]);
 
   const forecastSeries = useMemo(() => {
     const src = selected || points[0];
@@ -79,8 +110,10 @@ export default function App() {
     }
 
     return src.forecast_steps.map((step) => ({
-      t: step.time,
-      risk: step.trend
+      day: formatForecastLabel(step.time),
+      date: step.time,
+      risk: Math.round(step.trend),
+      rain: step.rain_mm
     }));
   }, [points, selected]);
 
@@ -96,32 +129,35 @@ export default function App() {
         setDensePoints(local);
       }
       setError(null);
+      setSearchStatus((prev) => (prev.startsWith("Live API unavailable") ? "" : prev));
     } catch (err) {
       const fallback = fallbackPoints();
       setPoints(fallback);
       setSelected(fallback[0]);
       setDensePoints([]);
       setError(null);
-      setSearchStatus("Live API unavailable. Showing no-data fallback.");
     } finally {
       setLoading(false);
     }
   }
 
-  async function handleMapClick(lat: number, lon: number) {
+  async function handleMapClick(lat: number, lon: number, name?: string, accuracyMeters?: number) {
     try {
       const [point, local] = await Promise.all([
-        fetchLocationRisk(lat, lon),
+        fetchLocationRisk(lat, lon, name || "Selected Area"),
         fetchAreaGrid(lat, lon, 20, 5)
       ]);
       setSelected(point);
+      setLocationAccuracyMeters(accuracyMeters ?? null);
       setDensePoints(local);
       setPoints((prev) => {
         const filtered = prev.filter((p) => !(Math.abs(p.lat - point.lat) < 0.0001 && Math.abs(p.lon - point.lon) < 0.0001));
         return [point, ...filtered].slice(0, 16);
       });
+      return point;
     } catch (err) {
       setError((err as Error).message);
+      return null;
     }
   }
 
@@ -133,8 +169,17 @@ export default function App() {
     setSearchStatus("Detecting your location...");
     navigator.geolocation.getCurrentPosition(
       async (pos) => {
-        await handleMapClick(pos.coords.latitude, pos.coords.longitude);
-        setSearchStatus("Location loaded.");
+        const accuracy = Number.isFinite(pos.coords.accuracy)
+          ? Math.min(Math.max(pos.coords.accuracy, 30), 5000)
+          : undefined;
+        const point = await handleMapClick(pos.coords.latitude, pos.coords.longitude, undefined, accuracy);
+        if (point) {
+          setSearchText(point.name);
+          setSearchStatus(`Location loaded: ${point.name} (±${Math.round(accuracy || 0)}m)`);
+          setSearchResults([]);
+        } else {
+          setSearchStatus("Unable to detect a usable location.");
+        }
       },
       () => setSearchStatus("Unable to detect your location."),
       {
@@ -154,12 +199,31 @@ export default function App() {
       const results = await geocodePlace(searchText);
       if (!results.length) {
         setSearchStatus("No results found.");
+        setSearchResults([]);
         return;
       }
-      await handleMapClick(results[0].lat, results[0].lon);
-      setSearchStatus(`Showing: ${results[0].name}`);
+      if (results.length === 1) {
+        const point = await handleMapClick(results[0].lat, results[0].lon, results[0].name);
+        if (point) {
+          setSearchText(results[0].name);
+          setSearchStatus(`Showing: ${results[0].name}`);
+          setSearchResults([]);
+        }
+        return;
+      }
+      setSearchResults(results);
+      setSearchStatus("Choose a result from the list.");
     } catch (err) {
       setSearchStatus((err as Error).message);
+    }
+  }
+
+  async function handleSearchResultClick(result: GeocodeResult) {
+    const point = await handleMapClick(result.lat, result.lon, result.name);
+    if (point) {
+      setSearchText(result.name);
+      setSearchResults([]);
+      setSearchStatus(`Showing: ${result.name}`);
     }
   }
 
@@ -175,9 +239,11 @@ export default function App() {
         const data = await fetchBoundaries();
         setCountryBoundary(data.country);
         setDistrictBoundaries(data.districts);
+        setUpazilaBoundaries(data.upazilas);
       } catch {
         setCountryBoundary(null);
         setDistrictBoundaries(null);
+        setUpazilaBoundaries(null);
       }
     }
 
@@ -217,6 +283,27 @@ export default function App() {
     }
   }
 
+  async function handleChatSend() {
+    const message = chatInput.trim();
+    if (!message) {
+      return;
+    }
+
+    const nextMessages = [...chatMessages, { role: "user" as const, content: message }];
+    setChatMessages(nextMessages);
+    setChatInput("");
+    setChatStatus("Thinking...");
+
+    try {
+      const reply = await fetchAiChat(nextMessages, selected?.name);
+      setChatMessages((prev) => [...prev, { role: "assistant", content: reply }]);
+      setChatStatus("");
+    } catch (err) {
+      setChatMessages((prev) => [...prev, { role: "assistant", content: (err as Error).message }]);
+      setChatStatus("AI chat unavailable.");
+    }
+  }
+
   return (
     <div className="theme-light app">
       <header className="topbar compact-topbar">
@@ -240,7 +327,7 @@ export default function App() {
               className="input"
               value={searchText}
               onChange={(e) => setSearchText(e.target.value)}
-              placeholder="Search any area"
+              placeholder="Search a place in English or Bengali"
             />
             <button className="icon-btn" onClick={handleSearch}>
               <Search size={16} /> Search
@@ -276,10 +363,30 @@ export default function App() {
             onSelect={setSelected}
             onMapClick={handleMapClick}
             selectedName={selected?.name || null}
+            highlightPoint={selected ? { lat: selected.lat, lon: selected.lon, name: selected.name } : null}
+            highlightAccuracyMeters={locationAccuracyMeters}
             mode={mapMode}
             countryBoundary={countryBoundary}
             districtBoundaries={districtBoundaries}
+            upazilaBoundaries={upazilaBoundaries}
           />
+          {searchResults.length ? (
+            <div className="search-results">
+              {searchResults.map((result) => (
+                <button
+                  key={`${result.lat}-${result.lon}-${result.name}`}
+                  className="search-result"
+                  onClick={() => handleSearchResultClick(result)}
+                >
+                  <span className="search-main">
+                    <strong>{result.name_en || result.name}</strong>
+                    {result.name_bn && result.name_bn !== result.name ? <small>{result.name_bn}</small> : null}
+                  </span>
+                  <span>{result.source || "search"}</span>
+                </button>
+              ))}
+            </div>
+          ) : null}
           <div className="legend">
             <span className="dot low" /> Low
             <span className="dot moderate" /> Moderate
@@ -367,10 +474,43 @@ export default function App() {
             <h3>
               <Bot size={16} /> AI Risk Brief
             </h3>
-            <button className="primary" onClick={handleAiSummary}>
-              Generate AI Summary
-            </button>
-            <pre className="ai-box">{aiSummary}</pre>
+            <div className="mode-switch ai-switch">
+              <button className={aiMode === "analysis" ? "mode-btn active" : "mode-btn"} onClick={() => setAiMode("analysis")}>
+                Area analysis
+              </button>
+              <button className={aiMode === "chat" ? "mode-btn active" : "mode-btn"} onClick={() => setAiMode("chat")}>
+                General chat
+              </button>
+            </div>
+            {aiMode === "analysis" ? (
+              <>
+                <button className="primary" onClick={handleAiSummary}>
+                  Generate AI Summary
+                </button>
+                <pre className="ai-box">{aiSummary}</pre>
+              </>
+            ) : (
+              <>
+                <div className="chat-box">
+                  {chatMessages.map((message, index) => (
+                    <div key={`${message.role}-${index}`} className={message.role === "user" ? "chat-bubble user" : "chat-bubble assistant"}>
+                      {message.content}
+                    </div>
+                  ))}
+                </div>
+                <textarea
+                  className="input chat-input"
+                  rows={4}
+                  placeholder="Ask about floods, weather, map search, or anything else"
+                  value={chatInput}
+                  onChange={(e) => setChatInput(e.target.value)}
+                />
+                <button className="primary" onClick={handleChatSend}>
+                  Send
+                </button>
+                {chatStatus ? <p className="hint">{chatStatus}</p> : null}
+              </>
+            )}
           </div>
 
           <div className="card">
@@ -381,7 +521,7 @@ export default function App() {
               <div className="forecast-timeline">
                 {selected.forecast_steps.map((step, idx) => (
                   <div key={idx} className="forecast-step">
-                    <div className="step-time">{step.time}</div>
+                    <div className="step-time">{formatForecastLabel(step.time)}</div>
                     <div className="step-bar">
                       <div
                         className="step-fill"
@@ -389,6 +529,7 @@ export default function App() {
                       />
                     </div>
                     <div className="step-rain">{step.rain_mm}mm</div>
+                    <div className={`step-level ${trendBand(step.trend)}`}>{trendBand(step.trend).toUpperCase()}</div>
                   </div>
                 ))}
               </div>
@@ -401,21 +542,27 @@ export default function App() {
 
       <section className="bottom-strip">
         <div className="card chart-card">
-          <h3>7 Day Risk Trend</h3>
+          <h3>7 Day Risk + Rain Outlook</h3>
           <div className="chart-wrap">
             <ResponsiveContainer width="100%" height={220}>
-              <AreaChart data={forecastSeries}>
-                <defs>
-                  <linearGradient id="riskGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#ef4444" stopOpacity={0.8} />
-                    <stop offset="100%" stopColor="#f97316" stopOpacity={0.1} />
-                  </linearGradient>
-                </defs>
-                <XAxis dataKey="t" />
-                <YAxis domain={[0, 100]} />
-                <Tooltip />
-                <Area type="monotone" dataKey="risk" stroke="#ef4444" fill="url(#riskGrad)" />
-              </AreaChart>
+              <ComposedChart data={forecastSeries} margin={{ top: 8, right: 8, left: 2, bottom: 4 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(15, 23, 42, 0.12)" />
+                <XAxis dataKey="day" />
+                <YAxis yAxisId="left" domain={[0, 100]} />
+                <YAxis yAxisId="right" orientation="right" />
+                <Tooltip
+                  formatter={(value: number, name: string) =>
+                    name === "rain" ? [`${value} mm`, "Rain"] : [`${value}/100`, "Risk Index"]
+                  }
+                  labelFormatter={(label, items) => {
+                    const date = items?.[0]?.payload?.date;
+                    return date ? `${label} (${date})` : label;
+                  }}
+                />
+                <ChartLegend formatter={(value) => (value === "rain" ? "Rain (mm)" : "Risk Index")} />
+                <Bar yAxisId="right" dataKey="rain" fill="#38bdf8" radius={[4, 4, 0, 0]} />
+                <Line yAxisId="left" type="monotone" dataKey="risk" stroke="#ef4444" strokeWidth={2.4} dot={{ r: 3 }} />
+              </ComposedChart>
             </ResponsiveContainer>
           </div>
         </div>

@@ -4,9 +4,11 @@ Flood Spaces is a Bangladesh-focused real-time flood forecasting dashboard for a
 
 ## Highlights
 - Live map with risk-zone markers for 16 major Bangladesh regions (denser coverage)
-- Click-anywhere risk inspection with reverse-geocoded area names
+- Click-anywhere risk inspection with reverse-geocoded area names and a highlighted focus ring
+- My-location tracking with an accuracy radius overlay (Google Maps style approximate zone)
 - 5km local dynamic risk cells around selected map areas
-- District and country boundary overlays for Bangladesh
+- Upazila, district, and country boundary overlays for Bangladesh
+- Zoom-adaptive boundary detail: country (far), district (mid), upazila (close)
 - Map mode switching (`Risk`, `Rain`, `Wind`) with clear indicator colors
 - Risk levels with professional color indicators: low, moderate, high, severe, flood
 - Hover details on map: rainfall, wind, river discharge, confidence, satellite anomaly indicators
@@ -15,7 +17,9 @@ Flood Spaces is a Bangladesh-focused real-time flood forecasting dashboard for a
 - Telegram alert subscription for nearby high-risk zones
 - Automatic server-side alert checks every 5 minutes
 - **Enhanced AI risk briefing** powered by OpenRouter with satellite evidence
+- **General AI chat mode** beside area analysis for flood questions and map help
 - Clean map-first light UI optimized for readability
+- Bengali + English search support for place names, upazilas, and districts
 - Emergency contact panel for Bangladesh
 
 ## Data Sources (free-first)
@@ -27,7 +31,7 @@ Flood Spaces is a Bangladesh-focused real-time flood forecasting dashboard for a
 - OpenStreetMap map tiles (no key, fair-use) — base map
 - Nominatim geocoding/reverse geocoding (no key, fair-use) — place search
 - Photon geocoding fallback (no key) — additional search resilience
-- geoBoundaries API (no key) — district and country boundaries
+- geoBoundaries API (no key) — upazila, district, and country boundaries
 - OpenWeather current weather (optional key) — temperature blending
 - OpenRouter (optional key) — AI risk analysis with satellite context
 - Telegram Bot API (token required) — alert delivery
@@ -63,6 +67,7 @@ Open http://localhost:5173
 ### backend/.env
 - TELEGRAM_BOT_TOKEN: token from BotFather
 - OPENROUTER_API_KEY: optional key for AI summaries
+- OPENROUTER_MODEL: OpenRouter model name, defaults to a free chat model
 - OPENWEATHER_API_KEY: optional key for temperature blending
 - ALERT_RADIUS_KM: default alert radius
 - FRONTEND_ORIGIN: CORS origin, default http://localhost:5173

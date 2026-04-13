@@ -1,7 +1,8 @@
 import math
 import os
 import asyncio
-from typing import Dict, List
+import re
+from typing import Dict, List, Literal
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -67,7 +68,17 @@ class AIRequest(BaseModel):
     satellite_water_anomaly: float = 0.0
     river_discharge_m3s: float = 0.0
     confidence_pct: int = 50
-    forecast_steps: List[Dict] = []
+    forecast_steps: List[Dict] = Field(default_factory=list)
+
+
+class AIChatMessage(BaseModel):
+    role: Literal["system", "user", "assistant"]
+    content: str
+
+
+class AIChatRequest(BaseModel):
+    messages: List[AIChatMessage] = Field(default_factory=list)
+    area_name: str | None = None
 
 
 subscriptions: List[TelegramSubscription] = []
@@ -75,6 +86,10 @@ scheduler = AsyncIOScheduler()
 location_cache: Dict[str, Dict] = {}
 grid_cache: Dict[str, Dict] = {}
 boundary_cache: Dict[str, Dict] = {}
+
+
+def empty_geojson() -> Dict:
+    return {"type": "FeatureCollection", "features": []}
 
 
 def build_default_payload() -> Dict:
@@ -94,6 +109,59 @@ def build_default_payload() -> Dict:
         },
         "_meta": {"live": False},
     }
+
+
+def normalize_search_query(query: str) -> str:
+    return re.sub(r"\s+", " ", query.strip())
+
+
+def format_place_label(address: Dict) -> str:
+    parts = [
+        address.get("suburb"),
+        address.get("city_district"),
+        address.get("town") or address.get("city") or address.get("village"),
+        address.get("county"),
+        address.get("state"),
+        address.get("country"),
+    ]
+    labels = [str(part) for part in parts if part]
+    if labels:
+        return ", ".join(dict.fromkeys(labels))
+    return "Unknown"
+
+
+def dedupe_geocode_results(items: List[Dict]) -> List[Dict]:
+    seen = set()
+    results = []
+    for item in items:
+        key = (round(float(item["lat"]), 5), round(float(item["lon"]), 5), item["name"])
+        if key in seen:
+            continue
+        seen.add(key)
+        results.append(item)
+    return results
+
+
+def local_ai_fallback(messages: List[Dict[str, str]]) -> str:
+    last_user = ""
+    for message in reversed(messages):
+        if message.get("role") == "user":
+            last_user = str(message.get("content", "")).lower()
+            break
+
+    if "risk score" in last_user or "flood" in last_user or "evacu" in last_user:
+        return (
+            "Local AI fallback (OpenRouter unavailable):\n"
+            "1) Monitor rainfall and waterlogging alerts every 2-3 hours.\n"
+            "2) If roads are already waterlogged, move early to higher ground.\n"
+            "3) Keep emergency phone, power bank, clean water, and dry food ready for 24-48h.\n"
+            "4) Avoid crossing fast-moving water, even if depth looks low."
+        )
+
+    return (
+        "Local AI fallback (OpenRouter unavailable): I can still help with flood safety, map interpretation, "
+        "risk levels, and alert setup. Ask for area-specific guidance and I will provide practical steps."
+    )
 
 
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -196,6 +264,112 @@ def generate_forecast_steps(payload: Dict) -> List[Dict]:
     return steps
 
 
+async def openrouter_chat_completion(messages: List[Dict[str, str]], temperature: float = 0.2) -> str:
+    key = os.getenv("OPENROUTER_API_KEY", "")
+    if not key:
+        return local_ai_fallback(messages)
+
+    models = [
+        os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.1-8b-instruct:free"),
+        "qwen/qwen-2.5-7b-instruct:free",
+        "google/gemma-2-9b-it:free",
+    ]
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }
+    last_error: Exception | None = None
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        for model in dict.fromkeys(models):
+            payload = {
+                "model": model,
+                "messages": messages,
+                "temperature": temperature,
+            }
+            try:
+                response = await client.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload)
+                response.raise_for_status()
+                data = response.json()
+                return data.get("choices", [{}])[0].get("message", {}).get("content", "No summary returned.")
+            except Exception as exc:
+                last_error = exc
+
+    if last_error is not None:
+        return local_ai_fallback(messages)
+
+    return local_ai_fallback(messages)
+
+
+async def fetch_openweather_forecast_payload(lat: float, lon: float) -> Dict | None:
+    key = os.getenv("OPENWEATHER_API_KEY", "")
+    if not key:
+        return None
+
+    params = {
+        "lat": lat,
+        "lon": lon,
+        "appid": key,
+        "units": "metric",
+    }
+    url = "https://api.openweathermap.org/data/2.5/forecast"
+
+    now_utc = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    days = [(now_utc.date() + timedelta(days=offset)).isoformat() for offset in range(7)]
+
+    try:
+        async with httpx.AsyncClient(timeout=12) as client:
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+
+        hourly_precip = [0.0] * 168
+        hourly_wind = [0.0] * 168
+        daily_rain = {day: 0.0 for day in days}
+        daily_temp = {day: 0.0 for day in days}
+        daily_wind = {day: 0.0 for day in days}
+
+        for row in data.get("list", []):
+            ts = row.get("dt")
+            if not isinstance(ts, int):
+                continue
+
+            point_time = datetime.fromtimestamp(ts, timezone.utc).replace(minute=0, second=0, microsecond=0)
+            hour_index = int((point_time - now_utc).total_seconds() // 3600)
+            rain_3h = float(row.get("rain", {}).get("3h", 0.0) or 0.0)
+            wind_kmh = float(row.get("wind", {}).get("speed", 0.0) or 0.0) * 3.6
+            temp_max = float(row.get("main", {}).get("temp_max", 0.0) or 0.0)
+
+            for step in range(3):
+                idx = hour_index + step
+                if 0 <= idx < 168:
+                    hourly_precip[idx] += rain_3h / 3.0
+                    hourly_wind[idx] = max(hourly_wind[idx], wind_kmh)
+
+            day_key = point_time.date().isoformat()
+            if day_key in daily_rain:
+                daily_rain[day_key] += rain_3h
+                daily_temp[day_key] = max(daily_temp[day_key], temp_max)
+                daily_wind[day_key] = max(daily_wind[day_key], wind_kmh)
+
+        return {
+            "hourly": {
+                "time": [(now_utc + timedelta(hours=idx)).isoformat() for idx in range(168)],
+                "precipitation": [round(v, 3) for v in hourly_precip],
+                "wind_speed_10m": [round(v, 3) for v in hourly_wind],
+            },
+            "daily": {
+                "time": days,
+                "precipitation_sum": [round(daily_rain[day], 3) for day in days],
+                "temperature_2m_max": [round(daily_temp[day], 3) for day in days],
+                "wind_speed_10m_max": [round(daily_wind[day], 3) for day in days],
+            },
+            "_meta": {"live": True, "source": "openweather-forecast-fallback"},
+        }
+    except Exception:
+        return None
+
+
 async def fetch_open_meteo(lat: float, lon: float) -> Dict:
     params = {
         "latitude": lat,
@@ -209,16 +383,19 @@ async def fetch_open_meteo(lat: float, lon: float) -> Dict:
     headers = {"User-Agent": "Flood-Spaces/1.0"}
     for attempt in range(3):
         try:
-            async with httpx.AsyncClient(timeout=10, headers=headers) as client:
+            async with httpx.AsyncClient(timeout=12, headers=headers) as client:
                 response = await client.get(url, params=params)
                 response.raise_for_status()
                 payload = response.json()
                 payload["_meta"] = {"live": True}
                 return payload
         except Exception:
-            if attempt == 2:
-                return build_default_payload()
             await asyncio.sleep(0.5 * (attempt + 1))
+
+    fallback = await fetch_openweather_forecast_payload(lat, lon)
+    if fallback:
+        return fallback
+    return build_default_payload()
 
 
 async def fetch_nasa_power_precip(lat: float, lon: float) -> float:
@@ -319,7 +496,8 @@ async def reverse_geocode_name(lat: float, lon: float) -> str:
             response = await client.get(url, params=params, headers=headers)
             response.raise_for_status()
             data = response.json()
-        return str(data.get("display_name", "Selected Area")).split(",")[0]
+        address = data.get("address", {}) if isinstance(data, dict) else {}
+        return format_place_label(address) if address else str(data.get("display_name", "Selected Area")).split(",")[0]
     except Exception:
         return "Selected Area"
 
@@ -331,29 +509,39 @@ async def geocode_nominatim(query: str, limit: int = 5, bd_only: bool = True) ->
         "format": "jsonv2",
         "limit": limit,
         "addressdetails": 1,
+        "namedetails": 1,
     }
     if bd_only:
         params["countrycodes"] = "bd"
 
     headers = {
         "User-Agent": "Flood-Spaces/1.0",
-        "Accept-Language": "en,bn",
+        "Accept-Language": "bn,en",
     }
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             response = await client.get(url, params=params, headers=headers)
             response.raise_for_status()
             data = response.json()
-        return [
-            {
-                "name": item.get("display_name", "Unknown"),
-                "lat": float(item["lat"]),
-                "lon": float(item["lon"]),
-                "source": "nominatim",
-            }
-            for item in data
-            if "lat" in item and "lon" in item
-        ]
+        results = []
+        for item in data:
+            if "lat" not in item or "lon" not in item:
+                continue
+            address = item.get("address", {}) if isinstance(item, dict) else {}
+            namedetails = item.get("namedetails", {}) if isinstance(item, dict) else {}
+            name_bn = namedetails.get("name:bn") or namedetails.get("official_name:bn")
+            name_en = namedetails.get("name:en") or namedetails.get("official_name:en")
+            results.append(
+                {
+                    "name": format_place_label(address) if address else item.get("display_name", "Unknown"),
+                    "name_bn": name_bn,
+                    "name_en": name_en,
+                    "lat": float(item["lat"]),
+                    "lon": float(item["lon"]),
+                    "source": "nominatim",
+                }
+            )
+        return dedupe_geocode_results(results)
     except Exception:
         return []
 
@@ -379,28 +567,22 @@ async def geocode_photon(query: str, limit: int = 5) -> List[Dict]:
                 continue
             props = feature.get("properties", {})
             display_name = ", ".join(
-                [
-                    part
-                    for part in [
-                        props.get("name"),
-                        props.get("city"),
-                        props.get("state"),
-                        props.get("country"),
-                    ]
-                    if part
-                ]
+                [part for part in [props.get("name"), props.get("city"), props.get("district"), props.get("state"), props.get("country")] if part]
             )
-            if "bangladesh" not in display_name.lower() and props.get("countrycode", "").lower() != "bd":
+            country_name = str(props.get("country", "")).lower()
+            if "bangladesh" not in display_name.lower() and props.get("countrycode", "").lower() != "bd" and "bangladesh" not in country_name:
                 continue
             items.append(
                 {
                     "name": display_name or "Unknown",
+                    "name_en": props.get("name") or display_name or "Unknown",
+                    "name_bn": None,
                     "lat": float(coords[1]),
                     "lon": float(coords[0]),
                     "source": "photon",
                 }
             )
-        return items
+        return dedupe_geocode_results(items)
     except Exception:
         return []
 
@@ -413,22 +595,25 @@ async def fetch_geo_boundaries(adm: str) -> Dict:
         if age < 86400:
             return cached["data"]
 
-    meta_url = f"https://www.geoboundaries.org/api/current/gbOpen/BGD/{adm}/"
-    async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
-        meta_response = await client.get(meta_url)
-        meta_response.raise_for_status()
-        meta = meta_response.json()
+    try:
+        meta_url = f"https://www.geoboundaries.org/api/current/gbOpen/BGD/{adm}/"
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+            meta_response = await client.get(meta_url)
+            meta_response.raise_for_status()
+            meta = meta_response.json()
 
-        geo_url = meta.get("simplifiedGeometryGeoJSON") or meta.get("gjDownloadURL")
-        if not geo_url:
-            raise HTTPException(status_code=502, detail=f"Boundary URL missing for {adm}")
+            geo_url = meta.get("simplifiedGeometryGeoJSON") or meta.get("gjDownloadURL")
+            if not geo_url:
+                return empty_geojson()
 
-        geo_response = await client.get(geo_url)
-        geo_response.raise_for_status()
-        geojson = geo_response.json()
+            geo_response = await client.get(geo_url)
+            geo_response.raise_for_status()
+            geojson = geo_response.json()
 
-    boundary_cache[cache_key] = {"ts": datetime.now(timezone.utc).timestamp(), "data": geojson}
-    return geojson
+        boundary_cache[cache_key] = {"ts": datetime.now(timezone.utc).timestamp(), "data": geojson}
+        return geojson
+    except Exception:
+        return empty_geojson()
 
 
 def summarize_forecast(
@@ -445,7 +630,10 @@ def summarize_forecast(
     has_live_data = bool(payload.get("_meta", {}).get("live", False))
 
     if len(rain) < 24 or len(wind) < 6:
-        raise HTTPException(status_code=502, detail="Forecast payload incomplete")
+        payload = build_default_payload()
+        rain = payload.get("hourly", {}).get("precipitation", [])
+        wind = payload.get("hourly", {}).get("wind_speed_10m", [])
+        has_live_data = False
 
     rain_1h = float(rain[0])
     rain_6h = float(sum(rain[:6]))
@@ -510,7 +698,7 @@ async def risk_grid() -> Dict:
     cached = grid_cache.get(cache_key)
     if cached:
         age = datetime.now(timezone.utc).timestamp() - cached["ts"]
-        if age < 600:
+        if age < cached.get("ttl", 600):
             return cached["data"]
 
     summaries = await asyncio.gather(*[summarize_city(city) for city in CITY_SEEDS], return_exceptions=True)
@@ -526,10 +714,12 @@ async def risk_grid() -> Dict:
 
     data = {
         "country_focus": "Bangladesh",
-        "source": ["Open-Meteo", "Open-Meteo Flood", "NASA POWER"],
+        "source": ["Open-Meteo", "OpenWeather fallback", "Open-Meteo Flood", "NASA POWER"],
         "items": results,
     }
-    grid_cache[cache_key] = {"ts": datetime.now(timezone.utc).timestamp(), "data": data}
+    live_count = sum(1 for item in results if item.get("has_live_data"))
+    cache_ttl = 600 if live_count >= max(4, len(results) // 3) else 120
+    grid_cache[cache_key] = {"ts": datetime.now(timezone.utc).timestamp(), "ttl": cache_ttl, "data": data}
     return data
 
 
@@ -542,10 +732,12 @@ async def location_risk(lat: float, lon: float, name: str = "Selected Area") -> 
         if age < 300:
             return cached["data"]
 
-    payload = await fetch_open_meteo(lat, lon)
-    sat_precip = await fetch_nasa_power_precip(lat, lon)
-    river_discharge = await fetch_open_meteo_river_discharge(lat, lon)
-    temperature_c = await fetch_openweather_current(lat, lon)
+    payload, sat_precip, river_discharge, temperature_c = await asyncio.gather(
+        fetch_open_meteo(lat, lon),
+        fetch_nasa_power_precip(lat, lon),
+        fetch_open_meteo_river_discharge(lat, lon),
+        fetch_openweather_current(lat, lon),
+    )
     area_name = name
     if not name or name == "Selected Area":
         area_name = await reverse_geocode_name(lat, lon)
@@ -558,6 +750,11 @@ async def location_risk(lat: float, lon: float, name: str = "Selected Area") -> 
 
     if result["is_no_data"]:
         proxy = await summarize_city(nearest_city_seed(lat, lon))
+        if proxy.get("is_no_data"):
+            grid = await risk_grid()
+            items = grid.get("items", [])
+            if items:
+                proxy = min(items, key=lambda item: haversine_km(lat, lon, float(item["lat"]), float(item["lon"])))
         proxy["name"] = area_name
         proxy["lat"] = lat
         proxy["lon"] = lon
@@ -571,27 +768,46 @@ async def location_risk(lat: float, lon: float, name: str = "Selected Area") -> 
 
 @app.get("/api/geocode")
 async def geocode(q: str) -> Dict:
-    if not q.strip():
+    query = normalize_search_query(q)
+    if not query:
         raise HTTPException(status_code=400, detail="Search query required")
 
-    bd_results = await geocode_nominatim(q, limit=5, bd_only=True)
+    queries = [query]
+    if "bangladesh" not in query.lower():
+        queries.append(f"{query}, Bangladesh")
+
+    bd_results: List[Dict] = []
+    for candidate in queries:
+        bd_results = await geocode_nominatim(candidate, limit=8, bd_only=True)
+        if bd_results:
+            break
+
     if not bd_results:
-        bd_results = await geocode_photon(q, limit=5)
+        for candidate in queries:
+            bd_results = await geocode_nominatim(candidate, limit=8, bd_only=False)
+            if bd_results:
+                break
+
     if not bd_results:
-        bd_results = await geocode_nominatim(q, limit=5, bd_only=False)
+        for candidate in queries:
+            bd_results = await geocode_photon(candidate, limit=8)
+            if bd_results:
+                break
 
     return {"items": bd_results}
 
 
 @app.get("/api/boundaries")
 async def boundaries() -> Dict:
-    country, districts = await asyncio.gather(
+    country, districts, upazilas = await asyncio.gather(
         fetch_geo_boundaries("ADM0"),
         fetch_geo_boundaries("ADM2"),
+        fetch_geo_boundaries("ADM3"),
     )
     return {
         "country": country,
         "districts": districts,
+        "upazilas": upazilas,
     }
 
 
@@ -729,41 +945,39 @@ async def shutdown_event() -> None:
 
 @app.post("/api/ai/summary")
 async def ai_summary(body: AIRequest) -> Dict:
-    key = os.getenv("OPENROUTER_API_KEY", "")
-    if not key:
-        return {
-            "summary": "OpenRouter key not configured. Add OPENROUTER_API_KEY in backend .env to enable AI summaries."
-        }
-
+    forecast_preview = "; ".join(f"{step['time']}: {step['rain_mm']}mm" for step in body.forecast_steps[:3])
     prompt = (
         "You are a flood safety expert for Bangladesh. Provide a professional risk briefing using NASA satellite data. "
         f"Area: {body.area_name}. Risk score: {body.risk_score}/100 (Confidence: {body.confidence_pct}%). "
         f"Rainfall 24h: {body.rainfall_24h_mm} mm | Wind: {body.wind_kmh} km/h | "
         f"River Discharge: {body.river_discharge_m3s} m³/s | NASA Satellite Water Anomaly: {body.satellite_water_anomaly:.0%}. "
-        f"72h Forecast: {'; '.join([f'{s['time']}: {s['rain_mm']}mm' for s in body.forecast_steps[:3]])}. "
+        f"72h Forecast: {forecast_preview}. "
         "Format response as: "
         "🚨 RISK REASON (why this area is at risk, satellite evidence?) "
         "✅ CONFIDENCE (data source reliability) "
         "🛑 IMMEDIATE ACTION (evacuation? shelter? leave area?) "
         "📍 SAFETY LEVEL (safe/vulnerable/dangerous)."
     )
-
-    headers = {
-        "Authorization": f"Bearer {key}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": "openai/gpt-4o-mini",
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.2,
-    }
-
-    async with httpx.AsyncClient(timeout=20) as client:
-        response = await client.post(
-            "https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload
-        )
-        response.raise_for_status()
-        data = response.json()
-
-    summary = data.get("choices", [{}])[0].get("message", {}).get("content", "No summary returned.")
+    summary = await openrouter_chat_completion([{ "role": "user", "content": prompt }])
     return {"summary": summary}
+
+
+@app.post("/api/ai/chat")
+async def ai_chat(body: AIChatRequest) -> Dict:
+    user_messages = [message.model_dump() for message in body.messages if message.content.strip()]
+    if not user_messages:
+        raise HTTPException(status_code=400, detail="Chat message required")
+
+    system_prompt = (
+        "You are a concise flood intelligence assistant for Bangladesh. "
+        "Answer clearly and practically. If the user asks about floods, weather, search, boundaries, alerts, or map usage, "
+        "respond with actionable guidance. If the question is general, answer normally."
+    )
+    if body.area_name:
+        system_prompt += f" Current area context: {body.area_name}."
+
+    reply = await openrouter_chat_completion(
+        [{"role": "system", "content": system_prompt}, *user_messages],
+        temperature=0.4,
+    )
+    return {"reply": reply}

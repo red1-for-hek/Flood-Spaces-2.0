@@ -5,7 +5,12 @@ frontend/dist/
 # Backend
 backend/.venv/
 __pycache__/
+*.pyc
 
+# Env secrets
+.env
+*.env
+!.env.example
 
 # OS/editor
 .DS_Store

@@ -1,19 +1,43 @@
 import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, Bell, Bot, Clock3, LocateFixed, RefreshCw, Search } from "lucide-react";
-import { Bar, CartesianGrid, ComposedChart, Legend as ChartLegend, Line, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import {
+  AlertTriangle,
+  Bell,
+  Bot,
+  Clock3,
+  CloudLightning,
+  CloudRain,
+  CloudSun,
+  LocateFixed,
+  RefreshCw,
+  Search,
+  Sun
+} from "lucide-react";
+import {
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis
+} from "recharts";
 import MapPanel from "./components/MapPanel";
+import LoadingScreen from "./components/LoadingScreen";
 import {
   fetchAiChat,
   fetchAiSummary,
   fetchAreaGrid,
+  fetchBdRiverWatch,
   fetchBoundaries,
+  fetchGlobalFloodEvents,
   fetchLocationRisk,
   fetchRiskGrid,
+  fetchUpstreamStatus,
   geocodePlace,
   runAlertCheck,
   subscribeTelegram
 } from "./lib/api";
-import type { GeocodeResult, RiskPoint } from "./types";
+import type { GeocodeResult, GlobalFloodEvent, RiskPoint, UpstreamStatus } from "./types";
 
 const bdEmergencyContacts = [
   { name: "National Emergency", value: "999" },
@@ -23,6 +47,10 @@ const bdEmergencyContacts = [
 
 function levelClass(level: RiskPoint["risk_level"]) {
   return `risk risk-${level}`;
+}
+
+function riskLabel(level: RiskPoint["risk_level"] | "low" | "moderate" | "high" | "severe") {
+  return level === "low" ? "NORMAL" : level.toUpperCase();
 }
 
 function formatForecastLabel(time: string): string {
@@ -44,6 +72,48 @@ function trendBand(trend: number): "low" | "moderate" | "high" | "severe" {
     return "high";
   }
   return "severe";
+}
+
+function riskBandFromScore(score: number): "low" | "moderate" | "high" | "severe" {
+  if (score < 45) {
+    return "low";
+  }
+  if (score < 68) {
+    return "moderate";
+  }
+  if (score < 84) {
+    return "high";
+  }
+  return "severe";
+}
+
+function formatEventTime(value: string): string {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+  return parsed.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+}
+
+function weatherVisual(trend: number, windKmh: number): { label: string; tone: "clear" | "cloudy" | "rain" | "storm"; Icon: typeof Sun } {
+  if (trend >= 80 || windKmh >= 55) {
+    return { label: "Storm", tone: "storm", Icon: CloudLightning };
+  }
+  if (trend >= 55) {
+    return { label: "Thunder", tone: "storm", Icon: CloudLightning };
+  }
+  if (trend >= 35) {
+    return { label: "Rain", tone: "rain", Icon: CloudRain };
+  }
+  if (trend >= 18) {
+    return { label: "Partly Cloudy", tone: "cloudy", Icon: CloudSun };
+  }
+  return { label: "Sunny", tone: "clear", Icon: Sun };
 }
 
 function fallbackPoints(): RiskPoint[] {
@@ -89,7 +159,6 @@ export default function App() {
   ]);
   const [chatInput, setChatInput] = useState("");
   const [chatStatus, setChatStatus] = useState("");
-  const [mapMode, setMapMode] = useState<"risk" | "rain" | "wind">("risk");
   const [countryBoundary, setCountryBoundary] = useState<Record<string, unknown> | null>(null);
   const [districtBoundaries, setDistrictBoundaries] = useState<Record<string, unknown> | null>(null);
   const [upazilaBoundaries, setUpazilaBoundaries] = useState<Record<string, unknown> | null>(null);
@@ -102,28 +171,119 @@ export default function App() {
   const [searchText, setSearchText] = useState("Dhaka, Bangladesh");
   const [searchStatus, setSearchStatus] = useState("");
   const [searchResults, setSearchResults] = useState<GeocodeResult[]>([]);
+  const [upstreamStatus, setUpstreamStatus] = useState<UpstreamStatus | null>(null);
+  const [aiProviderStatus, setAiProviderStatus] = useState("");
+  const [globalFloodEvents, setGlobalFloodEvents] = useState<GlobalFloodEvent[]>([]);
+  const [globalFloodStatus, setGlobalFloodStatus] = useState<"live" | "unavailable" | "unknown">("unknown");
+  const [riverWatchPoints, setRiverWatchPoints] = useState<RiskPoint[]>([]);
 
-  const forecastSeries = useMemo(() => {
+  const forecastHotspots = useMemo(() => {
+    return points
+      .map((point) => {
+        const steps = point.forecast_steps || [];
+        const sample = steps.slice(0, 10);
+        const avgTrend = sample.length
+          ? sample.reduce((sum, step) => sum + step.trend, 0) / sample.length
+          : 0;
+        const peakTrend = sample.length ? Math.max(...sample.map((step) => step.trend)) : 0;
+        const monthSignal = Math.round(Math.max(point.risk_score, (avgTrend * 0.62) + (peakTrend * 0.38)));
+        return {
+          name: point.name,
+          monthlySignal: monthSignal,
+          monthlyLevel: riskBandFromScore(monthSignal),
+          peakTime: sample.length ? sample[0].time : "N/A"
+        };
+      })
+      .sort((a, b) => b.monthlySignal - a.monthlySignal)
+      .slice(0, 10);
+  }, [points]);
+
+  const riverWatchTop = useMemo(() => {
+    const bestByRiver = new Map<string, RiskPoint>();
+    for (const point of riverWatchPoints) {
+      const key = String(point.river_name || point.name || "Unknown River").trim().toLowerCase();
+      const existing = bestByRiver.get(key);
+      if (!existing || point.risk_score > existing.risk_score) {
+        bestByRiver.set(key, point);
+      }
+    }
+
+    return [...bestByRiver.values()]
+      .sort((a, b) => b.risk_score - a.risk_score)
+      .slice(0, 8);
+  }, [riverWatchPoints]);
+
+  const riverWatchScale = useMemo(() => {
+    if (!riverWatchTop.length) {
+      return { min: 0, max: 100 };
+    }
+    const scores = riverWatchTop.map((spot) => spot.risk_score);
+    return {
+      min: Math.min(...scores),
+      max: Math.max(...scores)
+    };
+  }, [riverWatchTop]);
+
+  const weatherForecast = useMemo(() => {
+    const src = selected || points[0];
+    if (!src) {
+      return [];
+    }
+    const steps = src.forecast_steps.slice(0, 7);
+    return steps.map((step) => ({
+      ...step,
+      temp_c: typeof step.temp_c === "number" ? step.temp_c : src.temperature_c,
+      wind_kmh: typeof step.wind_kmh === "number" ? step.wind_kmh : src.wind_kmh,
+      ...weatherVisual(step.trend, typeof step.wind_kmh === "number" ? step.wind_kmh : src.wind_kmh)
+    }));
+  }, [points, selected]);
+
+  const forecastTrendData = useMemo(() => {
     const src = selected || points[0];
     if (!src) {
       return [];
     }
 
-    return src.forecast_steps.map((step) => ({
-      day: formatForecastLabel(step.time),
-      date: step.time,
-      risk: Math.round(step.trend),
-      rain: step.rain_mm
+    const steps = src.short_forecast_steps?.length ? src.short_forecast_steps : src.forecast_steps.slice(0, 3);
+
+    return steps.map((step) => ({
+      label: formatForecastLabel(step.time),
+      risk: Math.round(step.trend)
     }));
   }, [points, selected]);
+
+  const liveFloodTop = useMemo(() => {
+    const severityRank = { emergency: 3, warning: 2, watch: 1 } as const;
+    return [...globalFloodEvents]
+      .sort((a, b) => {
+        const bySeverity = severityRank[b.severity] - severityRank[a.severity];
+        if (bySeverity !== 0) {
+          return bySeverity;
+        }
+        return String(b.observed_at).localeCompare(String(a.observed_at));
+      })
+      .slice(0, 8);
+  }, [globalFloodEvents]);
 
   async function loadGrid() {
     try {
       setLoading(true);
-      const data = await fetchRiskGrid();
-      setPoints(data.items);
-      const initial = data.items[0] || null;
+      const [data, status, eventData, riverData] = await Promise.all([
+        fetchRiskGrid(),
+        fetchUpstreamStatus().catch(() => null),
+        fetchGlobalFloodEvents().catch(() => null),
+        fetchBdRiverWatch().catch(() => null)
+      ]);
+      const ranked = [...data.items].sort((a, b) => b.risk_score - a.risk_score);
+      setPoints(ranked);
+      const initial = ranked[0] || null;
       setSelected((prev) => prev || initial);
+      if (status) {
+        setUpstreamStatus(status);
+      }
+      setGlobalFloodEvents(eventData?.items || []);
+      setGlobalFloodStatus(eventData?.status || (eventData?.items?.length ? "live" : "unknown"));
+      setRiverWatchPoints(riverData?.items || []);
       if (initial) {
         const local = await fetchAreaGrid(initial.lat, initial.lon, 20, 5);
         setDensePoints(local);
@@ -135,6 +295,9 @@ export default function App() {
       setPoints(fallback);
       setSelected(fallback[0]);
       setDensePoints([]);
+      setGlobalFloodEvents([]);
+      setGlobalFloodStatus("unknown");
+      setRiverWatchPoints([]);
       setError(null);
     } finally {
       setLoading(false);
@@ -277,9 +440,15 @@ export default function App() {
     setAiSummary("Generating AI flood explanation...");
     try {
       const summary = await fetchAiSummary(selected);
-      setAiSummary(summary);
+      setAiSummary(summary.summary);
+      if (summary.provider_live) {
+        setAiProviderStatus(`AI provider live (${summary.provider_model || summary.provider || "openrouter"})`);
+      } else {
+        setAiProviderStatus(`AI fallback active (${summary.provider_reason || "openrouter unavailable"})`);
+      }
     } catch (err) {
       setAiSummary((err as Error).message);
+      setAiProviderStatus("AI provider check failed.");
     }
   }
 
@@ -296,12 +465,22 @@ export default function App() {
 
     try {
       const reply = await fetchAiChat(nextMessages, selected?.name);
-      setChatMessages((prev) => [...prev, { role: "assistant", content: reply }]);
+      setChatMessages((prev) => [...prev, { role: "assistant", content: reply.reply }]);
+      if (reply.provider_live) {
+        setAiProviderStatus(`AI provider live (${reply.provider_model || reply.provider || "openrouter"})`);
+      } else {
+        setAiProviderStatus(`AI fallback active (${reply.provider_reason || "openrouter unavailable"})`);
+      }
       setChatStatus("");
     } catch (err) {
       setChatMessages((prev) => [...prev, { role: "assistant", content: (err as Error).message }]);
       setChatStatus("AI chat unavailable.");
+      setAiProviderStatus("AI provider check failed.");
     }
+  }
+
+  if (loading && !points.length) {
+    return <LoadingScreen />;
   }
 
   return (
@@ -309,7 +488,7 @@ export default function App() {
       <header className="topbar compact-topbar">
         <div>
           <h1>Flood Spaces</h1>
-          <p>Bangladesh flood intelligence with live map forecasting</p>
+          <p>Live global flood watch with Bangladesh-focused monthly forecasting</p>
         </div>
         <div className="top-actions">
           <button onClick={loadGrid} className="icon-btn">
@@ -318,58 +497,31 @@ export default function App() {
         </div>
       </header>
 
-      <section className="map-shell">
-        <section className="map-wrap">
-          {loading ? <div className="loading">Loading map data...</div> : null}
-          {error ? <div className="error">{error}</div> : null}
-          <div className="map-toolbar">
-            <input
-              className="input"
-              value={searchText}
-              onChange={(e) => setSearchText(e.target.value)}
-              placeholder="Search a place in English or Bengali"
-            />
-            <button className="icon-btn" onClick={handleSearch}>
-              <Search size={16} /> Search
-            </button>
-            <button className="icon-btn" onClick={handleUseMyLocation}>
-              <LocateFixed size={16} /> My Location
-            </button>
-            <div className="mode-switch">
-              <button
-                className={mapMode === "risk" ? "mode-btn active" : "mode-btn"}
-                onClick={() => setMapMode("risk")}
-              >
-                Risk
+      <section className="map-section">
+        <div className="map-wrap">
+          <div className="map-controls">
+            <div className="place-controls">
+              <input
+                className="input"
+                value={searchText}
+                onChange={(e) => setSearchText(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    handleSearch();
+                  }
+                }}
+                placeholder="Search a place in English or Bengali"
+              />
+              <button className="icon-btn" onClick={handleSearch}>
+                <Search size={16} /> Search
               </button>
-              <button
-                className={mapMode === "rain" ? "mode-btn active" : "mode-btn"}
-                onClick={() => setMapMode("rain")}
-              >
-                Rain
-              </button>
-              <button
-                className={mapMode === "wind" ? "mode-btn active" : "mode-btn"}
-                onClick={() => setMapMode("wind")}
-              >
-                Wind
+              <button className="icon-btn" onClick={handleUseMyLocation}>
+                <LocateFixed size={16} /> My Location
               </button>
             </div>
           </div>
           {searchStatus ? <div className="map-status">{searchStatus}</div> : null}
-          <MapPanel
-            points={points}
-            densePoints={densePoints}
-            onSelect={setSelected}
-            onMapClick={handleMapClick}
-            selectedName={selected?.name || null}
-            highlightPoint={selected ? { lat: selected.lat, lon: selected.lon, name: selected.name } : null}
-            highlightAccuracyMeters={locationAccuracyMeters}
-            mode={mapMode}
-            countryBoundary={countryBoundary}
-            districtBoundaries={districtBoundaries}
-            upazilaBoundaries={upazilaBoundaries}
-          />
           {searchResults.length ? (
             <div className="search-results">
               {searchResults.map((result) => (
@@ -387,19 +539,155 @@ export default function App() {
               ))}
             </div>
           ) : null}
-          <div className="legend">
-            <span className="dot low" /> Low
-            <span className="dot moderate" /> Moderate
-            <span className="dot high" /> High
-            <span className="dot severe" /> Severe
-            <span className="dot flood" /> Flood
-            <span className="dot no-data" /> No Data
-            <span className="dot dense" /> 5km cells
+          <div className="map-canvas-wrap">
+            {loading ? <div className="loading">Loading map data...</div> : null}
+            {error ? <div className="error">{error}</div> : null}
+            <MapPanel
+              points={points}
+              densePoints={densePoints}
+              riverWatchPoints={riverWatchPoints}
+              onSelect={setSelected}
+              onMapClick={handleMapClick}
+              selectedName={selected?.name || null}
+              highlightPoint={selected ? { lat: selected.lat, lon: selected.lon, name: selected.name } : null}
+              highlightAccuracyMeters={locationAccuracyMeters}
+              mode="risk"
+              globalFloodEvents={globalFloodEvents}
+              countryBoundary={countryBoundary}
+              districtBoundaries={districtBoundaries}
+              upazilaBoundaries={upazilaBoundaries}
+            />
+            <div className="legend">
+              <span className="dot low" /> Normal
+              <span className="dot moderate" /> Moderate
+              <span className="dot high" /> High
+              <span className="dot severe" /> Severe
+              <span className="dot flood" /> Flood
+              <span className="dot active-flood" /> Active Global Flood
+              <span className="dot river-watch" /> River Watch
+            </div>
           </div>
-        </section>
+        </div>
+      </section>
 
-        <aside className="side-panel">
+      <section className="cards-section">
+        <div className="cards-grid">
           <div className="card">
+            <h3>
+              <RefreshCw size={16} /> Data Pipeline
+            </h3>
+            {upstreamStatus ? (
+              <>
+                <div className="stats-grid source-health-grid">
+                  <div>
+                    <label>Forecast API</label>
+                    <strong>{upstreamStatus.open_meteo.live || upstreamStatus.openweather_forecast_fallback.live ? "LIVE" : "DOWN"}</strong>
+                  </div>
+                  <div>
+                    <label>NASA</label>
+                    <strong>{upstreamStatus.nasa_power.live ? "LIVE" : "DELAYED"}</strong>
+                  </div>
+                  <div>
+                    <label>River API</label>
+                    <strong>{upstreamStatus.open_meteo_flood.live ? "LIVE" : "DOWN"}</strong>
+                  </div>
+                  <div>
+                    <label>OpenRouter</label>
+                    <strong>{upstreamStatus.openrouter.live ? "LIVE" : "FALLBACK"}</strong>
+                  </div>
+                </div>
+                <p className="hint">Sample check zone: {upstreamStatus.sample_area}</p>
+                <p className="hint">
+                  Active global flood events: {globalFloodEvents.length} ({globalFloodStatus === "live" ? "live" : "feed delayed"})
+                </p>
+              </>
+            ) : (
+              <p className="hint">Source status unavailable. Press refresh.</p>
+            )}
+            </div>
+
+            <div className="card">
+              <h3>
+                <AlertTriangle size={16} /> Live Global Flood Locations
+              </h3>
+              {liveFloodTop.length ? (
+                <div className="flood-event-list">
+                  {liveFloodTop.map((event) => (
+                    <div key={`${event.id}-${event.lat}-${event.lon}`} className="flood-event-item">
+                      <strong>{event.title}</strong>
+                      <span>{event.source} - {event.severity.toUpperCase()}</span>
+                      <small>{formatEventTime(event.observed_at)}</small>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="hint">No live global flood event in feed right now.</p>
+              )}
+            </div>
+
+            <div className="card">
+            <h3>
+              <Clock3 size={16} /> 1 Month Bangladesh Outlook
+            </h3>
+            {forecastHotspots.length ? (
+              <div className="forecast-timeline">
+                {forecastHotspots.map((spot) => (
+                  <div key={spot.name} className="forecast-step">
+                    <div className="step-time">{spot.name}</div>
+                    <div className="step-bar">
+                      <div className="step-fill" style={{ width: `${Math.max(14, Math.min(spot.monthlySignal, 100))}%` }} />
+                    </div>
+                    <div className="step-rain">{spot.monthlySignal}%</div>
+                    <div className={`step-level ${spot.monthlyLevel}`}>
+                      {riskLabel(spot.monthlyLevel)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="hint">No forecast hotspots yet.</p>
+            )}
+            </div>
+
+            <div className="card">
+            <h3>
+              <CloudRain size={16} /> Bangladesh River Watch
+            </h3>
+            {riverWatchTop.length ? (
+              <div className="forecast-timeline river-watch-list">
+                {riverWatchTop.map((spot) => (
+                  <div key={`${spot.name}-${spot.lat}-${spot.lon}`} className="forecast-step">
+                    <div className="step-time">
+                      {spot.river_name || "River"}
+                      <small>{spot.name}</small>
+                    </div>
+                    <div className="step-bar">
+                      <div
+                        className="step-fill"
+                        style={{
+                          width: `${Math.max(
+                            14,
+                            Math.min(
+                              100,
+                              Math.round(
+                                (((spot.risk_score - riverWatchScale.min) / Math.max(1, riverWatchScale.max - riverWatchScale.min)) * 82) + 18
+                              )
+                            )
+                          )}%`
+                        }}
+                      />
+                    </div>
+                    <div className="step-rain">{Math.round(spot.risk_score)}%</div>
+                    <div className={`step-level ${riskBandFromScore(spot.risk_score)}`}>{riskLabel(riskBandFromScore(spot.risk_score))}</div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="hint">River watch data is loading or temporarily unavailable.</p>
+            )}
+            </div>
+
+            <div className="card span-2">
             <h3>
               <AlertTriangle size={16} /> Selected Zone
             </h3>
@@ -407,7 +695,7 @@ export default function App() {
               <>
                 <p className="zone-name">{selected.name}</p>
                 <p className={levelClass(selected.risk_level)}>
-                  {selected.risk_level.toUpperCase()} - {selected.risk_score}/100
+                  {riskLabel(selected.risk_level)} - {selected.risk_score}/100
                 </p>
                 <p className="hint">Confidence: {selected.confidence_pct}%</p>
                 <div className="stats-grid">
@@ -444,13 +732,18 @@ export default function App() {
                     <strong>{selected.is_true_flood_signal ? "Flood Dot" : "Watch"}</strong>
                   </div>
                 </div>
+                {selected.data_sources ? (
+                  <p className="hint">
+                    Sources: Forecast={selected.data_sources.forecast_source} | NASA={selected.data_sources.nasa_live ? "live" : "delayed"} | River={selected.data_sources.river_live ? "live" : "down"}
+                  </p>
+                ) : null}
               </>
             ) : (
               <p>Select a map marker.</p>
             )}
-          </div>
+            </div>
 
-          <div className="card">
+            <div className="card">
             <h3>
               <Bell size={16} /> Telegram Alert
             </h3>
@@ -468,12 +761,13 @@ export default function App() {
               Activate Alerts
             </button>
             {alertStatus ? <p className="hint">{alertStatus}</p> : null}
-          </div>
+            </div>
 
-          <div className="card">
+            <div className="card span-2">
             <h3>
               <Bot size={16} /> AI Risk Brief
             </h3>
+            {aiProviderStatus ? <p className="hint">{aiProviderStatus}</p> : null}
             <div className="mode-switch ai-switch">
               <button className={aiMode === "analysis" ? "mode-btn active" : "mode-btn"} onClick={() => setAiMode("analysis")}>
                 Area analysis
@@ -511,25 +805,25 @@ export default function App() {
                 {chatStatus ? <p className="hint">{chatStatus}</p> : null}
               </>
             )}
-          </div>
+            </div>
 
-          <div className="card">
+            <div className="card span-2">
             <h3>
-              <Clock3 size={16} /> 7 Day Forecast
+              <Clock3 size={16} /> 3 Day Flood Forecast (Selected Area)
             </h3>
             {selected?.forecast_steps && selected.forecast_steps.length > 0 ? (
               <div className="forecast-timeline">
-                {selected.forecast_steps.map((step, idx) => (
+                {(selected.short_forecast_steps?.length ? selected.short_forecast_steps : selected.forecast_steps.slice(0, 3)).map((step, idx) => (
                   <div key={idx} className="forecast-step">
                     <div className="step-time">{formatForecastLabel(step.time)}</div>
                     <div className="step-bar">
                       <div
                         className="step-fill"
-                        style={{ width: `${Math.min(step.trend, 100)}%` }}
+                        style={{ width: `${Math.max(14, Math.min(step.trend, 100))}%` }}
                       />
                     </div>
-                    <div className="step-rain">{step.rain_mm}mm</div>
-                    <div className={`step-level ${trendBand(step.trend)}`}>{trendBand(step.trend).toUpperCase()}</div>
+                    <div className="step-rain">{Math.round(step.trend)}%</div>
+                    <div className={`step-level ${trendBand(step.trend)}`}>{riskLabel(trendBand(step.trend))}</div>
                   </div>
                 ))}
               </div>
@@ -537,33 +831,60 @@ export default function App() {
               <p className="hint">No forecast data available</p>
             )}
           </div>
-        </aside>
+        </div>
       </section>
 
       <section className="bottom-strip">
-        <div className="card chart-card">
-          <h3>7 Day Risk + Rain Outlook</h3>
-          <div className="chart-wrap">
-            <ResponsiveContainer width="100%" height={220}>
-              <ComposedChart data={forecastSeries} margin={{ top: 8, right: 8, left: 2, bottom: 4 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="rgba(15, 23, 42, 0.12)" />
-                <XAxis dataKey="day" />
-                <YAxis yAxisId="left" domain={[0, 100]} />
-                <YAxis yAxisId="right" orientation="right" />
-                <Tooltip
-                  formatter={(value: number, name: string) =>
-                    name === "rain" ? [`${value} mm`, "Rain"] : [`${value}/100`, "Risk Index"]
-                  }
-                  labelFormatter={(label, items) => {
-                    const date = items?.[0]?.payload?.date;
-                    return date ? `${label} (${date})` : label;
-                  }}
-                />
-                <ChartLegend formatter={(value) => (value === "rain" ? "Rain (mm)" : "Risk Index")} />
-                <Bar yAxisId="right" dataKey="rain" fill="#38bdf8" radius={[4, 4, 0, 0]} />
-                <Line yAxisId="left" type="monotone" dataKey="risk" stroke="#ef4444" strokeWidth={2.4} dot={{ r: 3 }} />
-              </ComposedChart>
-            </ResponsiveContainer>
+        <div className="bottom-main">
+          <div className="card chart-card">
+            <h3>3 Day Risk Graph (Selected Area)</h3>
+            {selected ? <p className="hint">{selected.name}</p> : null}
+            <div className="chart-wrap">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={forecastTrendData} margin={{ top: 14, right: 16, bottom: 4, left: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(15, 23, 42, 0.2)" />
+                  <XAxis dataKey="label" tick={{ fontSize: 11 }} interval={0} />
+                  <YAxis tick={{ fontSize: 11 }} domain={[0, 100]} />
+                  <Tooltip
+                    formatter={(value: number) => [`${value}%`, "Risk trend"]}
+                    labelFormatter={(label) => `Day: ${label}`}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="risk"
+                    stroke="#dc2626"
+                    strokeWidth={3}
+                    dot={{ r: 3.5, fill: "#dc2626" }}
+                    activeDot={{ r: 5 }}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+
+          <div className="card weather-card">
+            <h3>
+              <CloudSun size={16} /> 7 Day Weather & Rain Forecast (Selected Area)
+            </h3>
+            {selected ? <p className="hint">{selected.name}</p> : null}
+            {weatherForecast.length ? (
+              <div className="weather-grid">
+                {weatherForecast.map((item, idx) => (
+                  <div key={`${item.time}-${idx}`} className={`weather-item ${item.tone}`}>
+                    <div className="weather-day">{formatForecastLabel(item.time)}</div>
+                    <item.Icon size={18} className="weather-icon" />
+                    <div className="weather-label">{item.label}</div>
+                    <div className="weather-meta">
+                      <div>{typeof item.temp_c === "number" ? `${Math.round(item.temp_c)} C` : "Temp n/a"}</div>
+                      <div>{typeof item.wind_kmh === "number" ? `${Math.round(item.wind_kmh)} km/h` : "Wind n/a"}</div>
+                      <div>{Math.round(item.rain_mm)} mm rain</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="hint">Weather forecast currently unavailable.</p>
+            )}
           </div>
         </div>
 

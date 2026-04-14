@@ -1,4 +1,15 @@
-import type { AIChatMessage, BoundaryResponse, GeocodeResult, RiskGridResponse, RiskPoint } from "../types";
+import type {
+  AIChatMessage,
+  AIChatResponse,
+  AISummaryResponse,
+  BoundaryResponse,
+  GeocodeResult,
+  GlobalFloodEventsResponse,
+  RiverWatchResponse,
+  RiskGridResponse,
+  RiskPoint,
+  UpstreamStatus
+} from "../types";
 
 function splitConfiguredBases(value: string): string[] {
   return value
@@ -83,8 +94,8 @@ export async function runAlertCheck(): Promise<{ ok: boolean; alerts_sent: numbe
   return requestJson<{ ok: boolean; alerts_sent: number }>("/api/alerts/check", { method: "POST" });
 }
 
-export async function fetchAiSummary(point: RiskPoint): Promise<string> {
-  const data = await requestJson<{ summary: string }>("/api/ai/summary", {
+export async function fetchAiSummary(point: RiskPoint): Promise<AISummaryResponse> {
+  return requestJson<AISummaryResponse>("/api/ai/summary", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -98,11 +109,10 @@ export async function fetchAiSummary(point: RiskPoint): Promise<string> {
       forecast_steps: point.forecast_steps
     })
   });
-  return data.summary;
 }
 
-export async function fetchAiChat(messages: AIChatMessage[], areaName?: string): Promise<string> {
-  const data = await requestJson<{ reply: string }>("/api/ai/chat", {
+export async function fetchAiChat(messages: AIChatMessage[], areaName?: string): Promise<AIChatResponse> {
+  return requestJson<AIChatResponse>("/api/ai/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -110,7 +120,6 @@ export async function fetchAiChat(messages: AIChatMessage[], areaName?: string):
       area_name: areaName ?? null
     })
   });
-  return data.reply;
 }
 
 export async function fetchLocationRisk(lat: number, lon: number, name = "Selected Area"): Promise<RiskPoint> {
@@ -142,4 +151,16 @@ export async function geocodePlace(query: string): Promise<GeocodeResult[]> {
 
 export async function fetchBoundaries(): Promise<BoundaryResponse> {
   return requestJson<BoundaryResponse>("/api/boundaries");
+}
+
+export async function fetchUpstreamStatus(): Promise<UpstreamStatus> {
+  return requestJson<UpstreamStatus>("/api/upstream-status");
+}
+
+export async function fetchGlobalFloodEvents(): Promise<GlobalFloodEventsResponse> {
+  return requestJson<GlobalFloodEventsResponse>("/api/global-flood-events");
+}
+
+export async function fetchBdRiverWatch(): Promise<RiverWatchResponse> {
+  return requestJson<RiverWatchResponse>("/api/bd-river-watch");
 }

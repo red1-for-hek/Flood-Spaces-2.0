@@ -13,7 +13,9 @@ Flood Spaces is a Bangladesh-focused real-time flood forecasting dashboard for a
 - Risk levels with professional color indicators: low, moderate, high, severe, flood
 - Hover details on map: rainfall, wind, river discharge, confidence, satellite anomaly indicators
 - **NASA satellite water anomaly detection** for real-time flood accuracy
-- **7-day forecast timeline** with precipitation trend visualization
+- **1-month forecast outlook** for Bangladesh forecast zones
+- **3-day selected-area forecast panel** for quick local planning
+- **Bangladesh river watch indicators** along major rivers (Surma, Kushiyara, Jamuna, Padma, Meghna, Brahmaputra, Teesta, Karnaphuli)
 - Telegram alert subscription for nearby high-risk zones
 - Automatic server-side alert checks every 5 minutes
 - **Enhanced AI risk briefing** powered by OpenRouter with satellite evidence
@@ -27,7 +29,7 @@ Flood Spaces is a Bangladesh-focused real-time flood forecasting dashboard for a
 - Open-Meteo Flood API river discharge (no key) — real-time river water data
 - NASA POWER precipitation (no key) — satellite-sensed precipitation from MODIS
 - **NASA satellite water anomaly detection** — derived from extreme precipitation + discharge patterns
-- **72h forecast** — generated from Open-Meteo hourly data (Now, +6h, +12h, +24h, +48h, +72h)
+- **1-month forecast outlook** — generated from Open-Meteo daily forecast windows
 - OpenStreetMap map tiles (no key, fair-use) — base map
 - Nominatim geocoding/reverse geocoding (no key, fair-use) — place search
 - Photon geocoding fallback (no key) — additional search resilience
@@ -49,7 +51,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-uvicorn app.main:app --reload --port 8000
+	uvicorn app.main:app --reload --port 8004
 ```
 
 ### 2) Frontend
@@ -73,7 +75,7 @@ Open http://localhost:5173
 - FRONTEND_ORIGIN: CORS origin, default http://localhost:5173
 
 ### frontend/.env
-- VITE_API_BASE_URL: backend URL, default http://localhost:8000
+- VITE_API_BASE_URL: backend URL, default http://localhost:8004
 
 ## Telegram Quick Start
 1. Create bot with BotFather and get token.

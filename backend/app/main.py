@@ -80,7 +80,7 @@ CITY_SEEDS = [
 ]
 
 MONTHLY_FORECAST_DAYS = 30
-SHORT_FORECAST_DAYS = 3
+SHORT_FORECAST_DAYS = 7
 
 
 class TelegramSubscription(BaseModel):
@@ -218,6 +218,12 @@ def local_ai_fallback(messages: List[Dict[str, str]]) -> str:
             last_user = str(message.get("content", "")).lower()
             break
 
+    if last_user.strip() in {"hi", "hello", "hey", "yo", "yooo"}:
+        return (
+            "Hello. I can help with general questions (math, writing, coding, planning) "
+            "and with flood-risk analysis when you ask for it."
+        )
+
     if "risk score" in last_user or "flood" in last_user or "evacu" in last_user:
         return (
             "Local AI fallback (OpenRouter unavailable):\n"
@@ -228,9 +234,33 @@ def local_ai_fallback(messages: List[Dict[str, str]]) -> str:
         )
 
     return (
-        "Local AI fallback (OpenRouter unavailable): I can still help with flood safety, map interpretation, "
-        "risk levels, and alert setup. Ask for area-specific guidance and I will provide practical steps."
+        "Local AI fallback (OpenRouter unavailable): I can still help with general questions and project questions. "
+        "For live web updates, I can provide guidance but may not have real-time browsing."
     )
+
+
+def openrouter_model_candidates(profile: Literal["fast", "balanced"] = "fast") -> List[str]:
+    configured_model = os.getenv("OPENROUTER_MODEL", "").strip()
+    fast_model = os.getenv("OPENROUTER_FAST_MODEL", "").strip()
+
+    if profile == "balanced":
+        models = [
+            configured_model or "openrouter/auto",
+            "openrouter/auto",
+            "google/gemini-2.0-flash-exp:free",
+            "qwen/qwen-2.5-7b-instruct:free",
+        ]
+    else:
+        models = [
+            fast_model or configured_model or "google/gemini-2.0-flash-exp:free",
+            "google/gemini-2.0-flash-exp:free",
+            "qwen/qwen-2.5-7b-instruct:free",
+            "meta-llama/llama-3.1-8b-instruct:free",
+            configured_model,
+            "openrouter/auto",
+        ]
+
+    return [model for model in dict.fromkeys(models) if model]
 
 
 def safe_error_message(error: Exception | None) -> str:
@@ -585,7 +615,12 @@ def generate_forecast_steps(payload: Dict, horizon_days: int = MONTHLY_FORECAST_
     return steps
 
 
-async def openrouter_chat_completion(messages: List[Dict[str, str]], temperature: float = 0.2, max_tokens: int = 450) -> Dict:
+async def openrouter_chat_completion(
+    messages: List[Dict[str, str]],
+    temperature: float = 0.2,
+    max_tokens: int = 450,
+    profile: Literal["fast", "balanced"] = "fast",
+) -> Dict:
     key = os.getenv("OPENROUTER_API_KEY", "").strip()
     if not key:
         return {
@@ -596,12 +631,7 @@ async def openrouter_chat_completion(messages: List[Dict[str, str]], temperature
             "provider_reason": "missing_openrouter_api_key",
         }
 
-    models = [
-        os.getenv("OPENROUTER_MODEL", "openrouter/auto").strip() or "openrouter/auto",
-        "openrouter/auto",
-        "qwen/qwen-2.5-7b-instruct:free",
-        "google/gemma-2-9b-it:free",
-    ]
+    models = openrouter_model_candidates(profile)
     referer = os.getenv("OPENROUTER_SITE_URL", frontend_origin).strip() or "http://localhost:5173"
     title = os.getenv("OPENROUTER_APP_NAME", "Flood Spaces").strip() or "Flood Spaces"
     headers = {
@@ -1272,7 +1302,7 @@ async def fetch_global_flood_events() -> List[Dict]:
     cached = global_flood_cache.get(cache_key)
     if cached:
         age = datetime.now(timezone.utc).timestamp() - cached["ts"]
-        if age < 600:
+        if age < 300:
             return cached["data"]
 
     nasa_rows, gdacs_rows = await asyncio.gather(
@@ -1700,10 +1730,16 @@ async def global_flood_events() -> Dict:
     events = await fetch_global_flood_events()
     sources = sorted({str(event.get("source", "Live Flood Feed")) for event in events})
 
+    latest_observed = ""
+    for event in events:
+        observed = normalize_event_timestamp(str(event.get("observed_at", "")))
+        if observed > latest_observed:
+            latest_observed = observed
+
     return {
         "source": sources or ["NASA EONET", "GDACS"],
         "status": "live" if events else "unavailable",
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": latest_observed or datetime.now(timezone.utc).isoformat(),
         "items": events,
     }
 
@@ -1956,25 +1992,36 @@ async def shutdown_event() -> None:
 @app.post("/api/ai/summary")
 async def ai_summary(body: AIRequest) -> Dict:
     forecast_preview = "; ".join(
-        f"{step.get('time', 'day')}: {step.get('rain_mm', 0)}mm"
-        for step in body.forecast_steps[:3]
+        f"{step.get('time', 'day')}: {step.get('rain_mm', 0)}mm rain, {step.get('trend', 0)}% risk"
+        for step in body.forecast_steps[:5]
         if isinstance(step, dict)
     )
     if not forecast_preview:
-        forecast_preview = "No short-term forecast steps available"
+        forecast_preview = "No forecast data available"
+    
+    nearby_areas = getattr(body, 'nearby_areas', '')
+    river_watch = getattr(body, 'river_watch', '')
+    
     prompt = (
-        "You are a flood safety expert for Bangladesh. Provide a professional risk briefing using NASA satellite data. "
+        "You are a fast-response flood safety expert for Bangladesh. Provide a professional risk briefing using NASA satellite data. "
         f"Area: {body.area_name}. Risk score: {body.risk_score}/100 (Confidence: {body.confidence_pct}%). "
         f"Rainfall 24h: {body.rainfall_24h_mm} mm | Wind: {body.wind_kmh} km/h | "
-        f"River Discharge: {body.river_discharge_m3s} m³/s | NASA Satellite Water Anomaly: {body.satellite_water_anomaly:.0%}. "
-        f"1 Month Forecast Outlook (first days preview): {forecast_preview}. "
-        "Format response as: "
-        "🚨 RISK REASON (why this area is at risk, satellite evidence?) "
-        "✅ CONFIDENCE (data source reliability) "
-        "🛑 IMMEDIATE ACTION (evacuation? shelter? leave area?) "
-        "📍 SAFETY LEVEL (safe/vulnerable/dangerous)."
+        f"River Discharge: {body.river_discharge_m3s} m³/s (cubic meters per second - water flow volume) | "
+        f"NASA Satellite Water Anomaly: {body.satellite_water_anomaly:.0%}. "
+        f"5-Day Forecast: {forecast_preview}. "
+        + (f"Nearby areas: {nearby_areas}. " if nearby_areas else "")
+        + (f"River watch: {river_watch}. " if river_watch else "")
+        + "Return clean Markdown only (no LaTeX, no HTML). "
+        "Use this structure: "
+        "## Risk Assessment, ## Data Confidence, ## Immediate Action, ## Safety Level. "
+        "Use concise bullets and bold key alerts."
     )
-    summary = await openrouter_chat_completion([{"role": "user", "content": prompt}], max_tokens=550)
+    summary = await openrouter_chat_completion(
+        [{"role": "user", "content": prompt}],
+        max_tokens=520,
+        temperature=0.25,
+        profile="fast",
+    )
     return {
         "summary": summary.get("text", "No summary returned."),
         "provider": summary.get("provider"),
@@ -1990,18 +2037,68 @@ async def ai_chat(body: AIChatRequest) -> Dict:
     if not user_messages:
         raise HTTPException(status_code=400, detail="Chat message required")
 
-    system_prompt = (
-        "You are a concise flood intelligence assistant for Bangladesh. "
-        "Answer clearly and practically. If the user asks about floods, weather, search, boundaries, alerts, or map usage, "
-        "respond with actionable guidance. If the question is general, answer normally."
+    last_user_message = ""
+    for message in reversed(user_messages):
+        if message.get("role") == "user":
+            last_user_message = str(message.get("content", "")).strip().lower()
+            break
+
+    if re.fullmatch(r"(hi+|hello+|hey+|yo+|yoo+|yooo+)[!.\s]*", last_user_message):
+        return {
+            "reply": "Hi. What do you want to do next? You can ask me anything, including general topics or Flood Spaces project data.",
+            "provider": "local-fast-greeting",
+            "provider_live": True,
+            "provider_model": "instant-rule",
+            "provider_reason": "greeting_fast_path",
+        }
+
+    project_keywords = (
+        "flood",
+        "risk",
+        "river",
+        "rain",
+        "weather",
+        "bangladesh",
+        "map",
+        "nasa",
+        "gdacs",
+        "alert",
+        "telegram",
+        "forecast",
+        "pipeline",
+        "dashboard",
+        "project",
     )
-    if body.area_name:
-        system_prompt += f" Current area context: {body.area_name}."
+    wants_selected_area = bool(re.search(r"\b(this area|selected area|current area|this zone|here)\b", last_user_message))
+    project_mode = any(keyword in last_user_message for keyword in project_keywords) or wants_selected_area
+
+    if project_mode:
+        system_prompt = (
+            "You are a helpful assistant for Flood Spaces and flood-risk guidance. "
+            "For flood/project questions, provide practical, actionable answers. "
+            "Return Markdown with short headings or bullets when useful. "
+            "Keep default responses concise (under 140 words) unless the user asks for detail. "
+            "Do not output LaTeX."
+        )
+        if body.area_name:
+            system_prompt += f" Current selected area: {body.area_name}."
+    else:
+        system_prompt = (
+            "You are a fast, general-purpose AI assistant. "
+            "You can answer any topic including math, coding, writing, planning, and general knowledge. "
+            "If asked for live web facts, be transparent about uncertainty and provide best guidance. "
+            "Return clear Markdown (lists, bold highlights) when useful. "
+            "If the user sends only a greeting, reply in one short friendly line and ask what they need. "
+            "Do not output long capability lists unless asked. "
+            "Keep default responses concise (under 120 words) unless the user asks for depth. "
+            "Do not output LaTeX unless the user explicitly asks for math notation."
+        )
 
     reply = await openrouter_chat_completion(
         [{"role": "system", "content": system_prompt}, *user_messages],
-        temperature=0.4,
-        max_tokens=450,
+        temperature=0.35,
+        max_tokens=420,
+        profile="fast",
     )
     return {
         "reply": reply.get("text", "No reply returned."),

@@ -21,6 +21,8 @@ import {
   XAxis,
   YAxis
 } from "recharts";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import MapPanel from "./components/MapPanel";
 import LoadingScreen from "./components/LoadingScreen";
 import {
@@ -40,9 +42,14 @@ import {
 import type { GeocodeResult, GlobalFloodEvent, RiskPoint, UpstreamStatus } from "./types";
 
 const bdEmergencyContacts = [
-  { name: "National Emergency", value: "999" },
-  { name: "Fire Service", value: "16163" },
-  { name: "Disaster Hotline", value: "1090" }
+  { name: "National Emergency", value: "999", link: "tel:999" },
+  { name: "Fire Service & Civil Defence", value: "16163", link: "tel:16163" },
+  { name: "Disaster Management Hotline", value: "1090", link: "tel:1090" },
+  { name: "Police Emergency", value: "100", link: "tel:100" },
+  { name: "Ambulance Service", value: "199", link: "tel:199" },
+  { name: "Bangladesh Meteorological Dept", value: "+880-2-8130305", link: "tel:+88028130305" },
+  { name: "Flood Forecasting & Warning Centre", value: "+880-2-9552629", link: "tel:+88029552629" },
+  { name: "Coast Guard Emergency", value: "01769-690690", link: "tel:01769690690" }
 ];
 
 function levelClass(level: RiskPoint["risk_level"]) {
@@ -54,11 +61,24 @@ function riskLabel(level: RiskPoint["risk_level"] | "low" | "moderate" | "high" 
 }
 
 function formatForecastLabel(time: string): string {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(time)) {
+    const [year, month, day] = time.split("-").map((value) => Number(value));
+    const localDate = new Date(year, month - 1, day, 12, 0, 0, 0);
+    return localDate.toLocaleDateString(undefined, { weekday: "short", day: "numeric" });
+  }
+
   const parsed = new Date(time);
   if (Number.isNaN(parsed.getTime())) {
     return time;
   }
   return parsed.toLocaleDateString(undefined, { weekday: "short", day: "numeric" });
+}
+
+function forecastIsoFromTodayOffset(offset: number): string {
+  const base = new Date();
+  base.setHours(12, 0, 0, 0);
+  base.setDate(base.getDate() + offset);
+  return base.toISOString();
 }
 
 function trendBand(trend: number): "low" | "moderate" | "high" | "severe" {
@@ -155,7 +175,11 @@ export default function App() {
   const [aiSummary, setAiSummary] = useState("Select a zone to generate AI explanation.");
   const [aiMode, setAiMode] = useState<"analysis" | "chat">("analysis");
   const [chatMessages, setChatMessages] = useState<Array<{ role: "assistant" | "user"; content: string }>>([
-    { role: "assistant", content: "Ask anything about flood risk, weather, search, alerts, or Bangladesh map usage." }
+    {
+      role: "assistant",
+      content:
+        "Ask anything you want: math, coding, writing, general knowledge, online-style research summaries, or Flood Spaces project data."
+    }
   ]);
   const [chatInput, setChatInput] = useState("");
   const [chatStatus, setChatStatus] = useState("");
@@ -178,25 +202,31 @@ export default function App() {
   const [riverWatchPoints, setRiverWatchPoints] = useState<RiskPoint[]>([]);
 
   const forecastHotspots = useMemo(() => {
-    return points
+    if (!selected) {
+      return [];
+    }
+    
+    const uniqueAreas = new Map<string, RiskPoint>();
+    
+    for (const point of points) {
+      const key = point.name.toLowerCase();
+      if (!key.includes("local") && !key.includes("cell") && !uniqueAreas.has(key)) {
+        uniqueAreas.set(key, point);
+      }
+    }
+
+    return Array.from(uniqueAreas.values())
       .map((point) => {
-        const steps = point.forecast_steps || [];
-        const sample = steps.slice(0, 10);
-        const avgTrend = sample.length
-          ? sample.reduce((sum, step) => sum + step.trend, 0) / sample.length
-          : 0;
-        const peakTrend = sample.length ? Math.max(...sample.map((step) => step.trend)) : 0;
-        const monthSignal = Math.round(Math.max(point.risk_score, (avgTrend * 0.62) + (peakTrend * 0.38)));
         return {
           name: point.name,
-          monthlySignal: monthSignal,
-          monthlyLevel: riskBandFromScore(monthSignal),
-          peakTime: sample.length ? sample[0].time : "N/A"
+          monthlySignal: Math.round(point.risk_score),
+          monthlyLevel: riskBandFromScore(point.risk_score),
+          peakTime: "N/A"
         };
       })
       .sort((a, b) => b.monthlySignal - a.monthlySignal)
       .slice(0, 10);
-  }, [points]);
+  }, [points, selected]);
 
   const riverWatchTop = useMemo(() => {
     const bestByRiver = new Map<string, RiskPoint>();
@@ -230,12 +260,15 @@ export default function App() {
       return [];
     }
     const steps = src.forecast_steps.slice(0, 7);
-    return steps.map((step) => ({
-      ...step,
-      temp_c: typeof step.temp_c === "number" ? step.temp_c : src.temperature_c,
-      wind_kmh: typeof step.wind_kmh === "number" ? step.wind_kmh : src.wind_kmh,
-      ...weatherVisual(step.trend, typeof step.wind_kmh === "number" ? step.wind_kmh : src.wind_kmh)
-    }));
+    return steps.map((step, idx) => {
+      return {
+        ...step,
+        display_time: forecastIsoFromTodayOffset(idx),
+        temp_c: typeof step.temp_c === "number" ? step.temp_c : src.temperature_c,
+        wind_kmh: typeof step.wind_kmh === "number" ? step.wind_kmh : src.wind_kmh,
+        ...weatherVisual(step.trend, typeof step.wind_kmh === "number" ? step.wind_kmh : src.wind_kmh)
+      };
+    });
   }, [points, selected]);
 
   const forecastTrendData = useMemo(() => {
@@ -244,12 +277,14 @@ export default function App() {
       return [];
     }
 
-    const steps = src.short_forecast_steps?.length ? src.short_forecast_steps : src.forecast_steps.slice(0, 3);
+    const steps = src.forecast_steps.slice(0, 7);
 
-    return steps.map((step) => ({
-      label: formatForecastLabel(step.time),
-      risk: Math.round(step.trend)
-    }));
+    return steps.map((step, idx) => {
+      return {
+        label: formatForecastLabel(forecastIsoFromTodayOffset(idx)),
+        risk: Math.round(step.trend)
+      };
+    });
   }, [points, selected]);
 
   const liveFloodTop = useMemo(() => {
@@ -265,6 +300,23 @@ export default function App() {
       .slice(0, 8);
   }, [globalFloodEvents]);
 
+  const liveFloodLastSeen = useMemo(() => {
+    const parsedTimes = globalFloodEvents
+      .map((event) => Date.parse(event.observed_at))
+      .filter((value) => Number.isFinite(value));
+
+    if (!parsedTimes.length) {
+      return null;
+    }
+
+    return new Date(Math.max(...parsedTimes)).toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit"
+    });
+  }, [globalFloodEvents]);
+
   async function loadGrid() {
     try {
       setLoading(true);
@@ -277,7 +329,19 @@ export default function App() {
       const ranked = [...data.items].sort((a, b) => b.risk_score - a.risk_score);
       setPoints(ranked);
       const initial = ranked[0] || null;
-      setSelected((prev) => prev || initial);
+      setSelected((prev) => {
+        if (!prev) {
+          return initial;
+        }
+
+        const match = ranked.find(
+          (point) =>
+            point.name.toLowerCase() === prev.name.toLowerCase() ||
+            (Math.abs(point.lat - prev.lat) < 0.03 && Math.abs(point.lon - prev.lon) < 0.03)
+        );
+
+        return match || prev;
+      });
       if (status) {
         setUpstreamStatus(status);
       }
@@ -306,16 +370,25 @@ export default function App() {
 
   async function handleMapClick(lat: number, lon: number, name?: string, accuracyMeters?: number) {
     try {
+      const actualName = name && !name.includes("Local") && !name.includes("Cell") ? name : undefined;
       const [point, local] = await Promise.all([
-        fetchLocationRisk(lat, lon, name || "Selected Area"),
+        fetchLocationRisk(lat, lon, actualName || "Selected Area"),
         fetchAreaGrid(lat, lon, 20, 5)
       ]);
       setSelected(point);
       setLocationAccuracyMeters(accuracyMeters ?? null);
-      setDensePoints(local);
+      setDensePoints(local.filter((p: RiskPoint) => !p.name.includes("Cell") && !p.name.includes("Local")));
       setPoints((prev) => {
-        const filtered = prev.filter((p) => !(Math.abs(p.lat - point.lat) < 0.0001 && Math.abs(p.lon - point.lon) < 0.0001));
-        return [point, ...filtered].slice(0, 16);
+        const filtered = prev.filter((p) => 
+          !(Math.abs(p.lat - point.lat) < 0.0001 && Math.abs(p.lon - point.lon) < 0.0001) &&
+          !p.name.includes("Cell") &&
+          !p.name.includes("Local")
+        );
+        const uniqueNames = new Set(filtered.map(p => p.name.toLowerCase()));
+        if (!uniqueNames.has(point.name.toLowerCase())) {
+          return [point, ...filtered].slice(0, 16);
+        }
+        return filtered;
       });
       return point;
     } catch (err) {
@@ -338,16 +411,26 @@ export default function App() {
         const point = await handleMapClick(pos.coords.latitude, pos.coords.longitude, undefined, accuracy);
         if (point) {
           setSearchText(point.name);
-          setSearchStatus(`Location loaded: ${point.name} (±${Math.round(accuracy || 0)}m)`);
+          setSearchStatus(`📍 ${point.name} (±${Math.round(accuracy || 0)}m accuracy)`);
           setSearchResults([]);
+          
+          const nearest = points.reduce((prev, curr) => {
+            const prevDist = Math.abs(prev.lat - pos.coords.latitude) + Math.abs(prev.lon - pos.coords.longitude);
+            const currDist = Math.abs(curr.lat - pos.coords.latitude) + Math.abs(curr.lon - pos.coords.longitude);
+            return currDist < prevDist ? curr : prev;
+          }, points[0]);
+          
+          if (nearest) {
+            setSelected(nearest);
+          }
         } else {
           setSearchStatus("Unable to detect a usable location.");
         }
       },
-      () => setSearchStatus("Unable to detect your location."),
+      () => setSearchStatus("❌ Unable to detect your location. Please enable location services."),
       {
         enableHighAccuracy: true,
-        timeout: 12000,
+        timeout: 15000,
         maximumAge: 0
       }
     );
@@ -358,10 +441,10 @@ export default function App() {
       return;
     }
     try {
-      setSearchStatus("Searching area...");
+      setSearchStatus("🔍 Searching...");
       const results = await geocodePlace(searchText);
       if (!results.length) {
-        setSearchStatus("No results found.");
+        setSearchStatus("❌ No results found. Try different keywords.");
         setSearchResults([]);
         return;
       }
@@ -369,15 +452,15 @@ export default function App() {
         const point = await handleMapClick(results[0].lat, results[0].lon, results[0].name);
         if (point) {
           setSearchText(results[0].name);
-          setSearchStatus(`Showing: ${results[0].name}`);
+          setSearchStatus(`✅ Showing: ${results[0].name}`);
           setSearchResults([]);
         }
         return;
       }
       setSearchResults(results);
-      setSearchStatus("Choose a result from the list.");
+      setSearchStatus(`📍 Found ${results.length} results - select one:`);
     } catch (err) {
-      setSearchStatus((err as Error).message);
+      setSearchStatus(`❌ ${(err as Error).message}`);
     }
   }
 
@@ -386,7 +469,7 @@ export default function App() {
     if (point) {
       setSearchText(result.name);
       setSearchResults([]);
-      setSearchStatus(`Showing: ${result.name}`);
+      setSearchStatus(`✅ Showing: ${result.name}`);
     }
   }
 
@@ -439,7 +522,12 @@ export default function App() {
     }
     setAiSummary("Generating AI flood explanation...");
     try {
-      const summary = await fetchAiSummary(selected);
+      const enrichedData = {
+        ...selected,
+        nearby_areas: forecastHotspots.slice(0, 5).map(h => `${h.name}: ${h.monthlySignal}% risk`).join(", "),
+        river_watch: riverWatchTop.slice(0, 3).map(r => `${r.river_name || r.name}: ${Math.round(r.river_discharge_m3s)} m³/s`).join(", ")
+      };
+      const summary = await fetchAiSummary(enrichedData);
       setAiSummary(summary.summary);
       if (summary.provider_live) {
         setAiProviderStatus(`AI provider live (${summary.provider_model || summary.provider || "openrouter"})`);
@@ -464,7 +552,8 @@ export default function App() {
     setChatStatus("Thinking...");
 
     try {
-      const reply = await fetchAiChat(nextMessages, selected?.name);
+      const wantsSelectedAreaContext = /\b(this area|selected area|current area|this zone|current zone|here)\b/i.test(message);
+      const reply = await fetchAiChat(nextMessages, wantsSelectedAreaContext ? selected?.name : undefined);
       setChatMessages((prev) => [...prev, { role: "assistant", content: reply.reply }]);
       if (reply.provider_live) {
         setAiProviderStatus(`AI provider live (${reply.provider_model || reply.provider || "openrouter"})`);
@@ -486,9 +575,12 @@ export default function App() {
   return (
     <div className="theme-light app">
       <header className="topbar compact-topbar">
-        <div>
-          <h1>Flood Spaces</h1>
-          <p>Live global flood watch with Bangladesh-focused monthly forecasting</p>
+        <div className="topbar-brand">
+          <img src="/logo.png" alt="Flood Spaces" className="logo" />
+          <div>
+            <h1>Flood Spaces</h1>
+            <p>Live global flood watch with Bangladesh-focused monthly forecasting</p>
+          </div>
         </div>
         <div className="top-actions">
           <button onClick={loadGrid} className="icon-btn">
@@ -562,7 +654,6 @@ export default function App() {
               <span className="dot moderate" /> Moderate
               <span className="dot high" /> High
               <span className="dot severe" /> Severe
-              <span className="dot flood" /> Flood
               <span className="dot active-flood" /> Active Global Flood
               <span className="dot river-watch" /> River Watch
             </div>
@@ -580,7 +671,7 @@ export default function App() {
               <>
                 <div className="stats-grid source-health-grid">
                   <div>
-                    <label>Forecast API</label>
+                    <label>Forecasting Model</label>
                     <strong>{upstreamStatus.open_meteo.live || upstreamStatus.openweather_forecast_fallback.live ? "LIVE" : "DOWN"}</strong>
                   </div>
                   <div>
@@ -588,7 +679,7 @@ export default function App() {
                     <strong>{upstreamStatus.nasa_power.live ? "LIVE" : "DELAYED"}</strong>
                   </div>
                   <div>
-                    <label>River API</label>
+                    <label>ML Analysis</label>
                     <strong>{upstreamStatus.open_meteo_flood.live ? "LIVE" : "DOWN"}</strong>
                   </div>
                   <div>
@@ -610,12 +701,20 @@ export default function App() {
               <h3>
                 <AlertTriangle size={16} /> Live Global Flood Locations
               </h3>
+              <p className="hint flood-severity-guide">
+                Severity colors: WATCH = green (early signal), WARNING = orange (active risk), EMERGENCY = red (critical event).
+              </p>
+              <p className="hint">Auto-refresh: every 5 minutes in app. NASA and GDACS sources update continuously or daily by source feed.</p>
+              {liveFloodLastSeen ? <p className="hint">Latest observed event: {liveFloodLastSeen}</p> : null}
               {liveFloodTop.length ? (
                 <div className="flood-event-list">
                   {liveFloodTop.map((event) => (
                     <div key={`${event.id}-${event.lat}-${event.lon}`} className="flood-event-item">
                       <strong>{event.title}</strong>
-                      <span>{event.source} - {event.severity.toUpperCase()}</span>
+                      <div className="flood-event-meta">
+                        <span>{event.source}</span>
+                        <span className={`flood-severity ${event.severity}`}>{event.severity.toUpperCase()}</span>
+                      </div>
                       <small>{formatEventTime(event.observed_at)}</small>
                     </div>
                   ))}
@@ -629,13 +728,15 @@ export default function App() {
             <h3>
               <Clock3 size={16} /> 1 Month Bangladesh Outlook
             </h3>
-            {forecastHotspots.length ? (
+            {!selected ? (
+              <p className="hint">Select an area from the map first.</p>
+            ) : forecastHotspots.length ? (
               <div className="forecast-timeline">
                 {forecastHotspots.map((spot) => (
                   <div key={spot.name} className="forecast-step">
                     <div className="step-time">{spot.name}</div>
                     <div className="step-bar">
-                      <div className="step-fill" style={{ width: `${Math.max(14, Math.min(spot.monthlySignal, 100))}%` }} />
+                      <div className="step-fill" style={{ width: `${spot.monthlySignal}%` }} />
                     </div>
                     <div className="step-rain">{spot.monthlySignal}%</div>
                     <div className={`step-level ${spot.monthlyLevel}`}>
@@ -651,9 +752,12 @@ export default function App() {
 
             <div className="card">
             <h3>
-              <CloudRain size={16} /> Bangladesh River Watch
+              <CloudRain size={16} /> Bangladesh River Watch (Discharge in m³/s)
             </h3>
-            {riverWatchTop.length ? (
+            <p className="hint">m³/s = cubic meters per second (water flow volume). Higher = more flood risk.</p>
+            {!selected ? (
+              <p className="hint">Select an area from the map first.</p>
+            ) : riverWatchTop.length ? (
               <div className="forecast-timeline river-watch-list">
                 {riverWatchTop.map((spot) => (
                   <div key={`${spot.name}-${spot.lat}-${spot.lon}`} className="forecast-step">
@@ -665,19 +769,11 @@ export default function App() {
                       <div
                         className="step-fill"
                         style={{
-                          width: `${Math.max(
-                            14,
-                            Math.min(
-                              100,
-                              Math.round(
-                                (((spot.risk_score - riverWatchScale.min) / Math.max(1, riverWatchScale.max - riverWatchScale.min)) * 82) + 18
-                              )
-                            )
-                          )}%`
+                          width: `${Math.max(0, Math.min(100, spot.risk_score))}%`
                         }}
                       />
                     </div>
-                    <div className="step-rain">{Math.round(spot.risk_score)}%</div>
+                    <div className="step-rain">{Math.round(spot.river_discharge_m3s)} m³/s</div>
                     <div className={`step-level ${riskBandFromScore(spot.risk_score)}`}>{riskLabel(riskBandFromScore(spot.risk_score))}</div>
                   </div>
                 ))}
@@ -691,7 +787,9 @@ export default function App() {
             <h3>
               <AlertTriangle size={16} /> Selected Zone
             </h3>
-            {selected ? (
+            {!selected ? (
+              <p className="hint">Select an area from the map first.</p>
+            ) : (
               <>
                 <p className="zone-name">{selected.name}</p>
                 <p className={levelClass(selected.risk_level)}>
@@ -709,7 +807,7 @@ export default function App() {
                   </div>
                   <div>
                     <label>Wind</label>
-                    <strong>{selected.wind_kmh} km/h</strong>
+                    <strong>{selected.wind_kmh > 0 ? `${selected.wind_kmh} km/h` : "n/a"}</strong>
                   </div>
                   <div>
                     <label>NASA Precip</label>
@@ -721,7 +819,7 @@ export default function App() {
                   </div>
                   <div>
                     <label>Temperature</label>
-                    <strong>{selected.temperature_c ?? "n/a"} C</strong>
+                    <strong>{selected.temperature_c !== null && selected.temperature_c !== undefined ? `${selected.temperature_c}°C` : "n/a"}</strong>
                   </div>
                   <div>
                     <label>Satellite Anomaly</label>
@@ -738,8 +836,6 @@ export default function App() {
                   </p>
                 ) : null}
               </>
-            ) : (
-              <p>Select a map marker.</p>
             )}
             </div>
 
@@ -763,88 +859,84 @@ export default function App() {
             {alertStatus ? <p className="hint">{alertStatus}</p> : null}
             </div>
 
-            <div className="card span-2">
+            <div className="card span-2 ai-card">
             <h3>
               <Bot size={16} /> AI Risk Brief
             </h3>
             {aiProviderStatus ? <p className="hint">{aiProviderStatus}</p> : null}
-            <div className="mode-switch ai-switch">
-              <button className={aiMode === "analysis" ? "mode-btn active" : "mode-btn"} onClick={() => setAiMode("analysis")}>
-                Area analysis
+            <div className="ai-mode-switch">
+              <button className={aiMode === "analysis" ? "active" : ""} onClick={() => setAiMode("analysis")}>
+                📊 Area Analysis
               </button>
-              <button className={aiMode === "chat" ? "mode-btn active" : "mode-btn"} onClick={() => setAiMode("chat")}>
-                General chat
+              <button className={aiMode === "chat" ? "active" : ""} onClick={() => setAiMode("chat")}>
+                💬 General Chat
               </button>
             </div>
             {aiMode === "analysis" ? (
-              <>
-                <button className="primary" onClick={handleAiSummary}>
-                  Generate AI Summary
-                </button>
-                <pre className="ai-box">{aiSummary}</pre>
-              </>
+              <div className="ai-analysis-panel">
+                <div className="ai-response markdown-render">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{aiSummary}</ReactMarkdown>
+                </div>
+                <div className="ai-actions">
+                  <button className="primary" onClick={handleAiSummary}>
+                    Generate AI Summary
+                  </button>
+                </div>
+              </div>
             ) : (
               <>
-                <div className="chat-box">
+                <div className="chat-container">
                   {chatMessages.map((message, index) => (
-                    <div key={`${message.role}-${index}`} className={message.role === "user" ? "chat-bubble user" : "chat-bubble assistant"}>
-                      {message.content}
+                    <div key={`${message.role}-${index}`} className={message.role === "user" ? "chat-message user" : "chat-message assistant"}>
+                      <div className="chat-content markdown-render">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+                      </div>
                     </div>
                   ))}
                 </div>
-                <textarea
-                  className="input chat-input"
-                  rows={4}
-                  placeholder="Ask about floods, weather, map search, or anything else"
-                  value={chatInput}
-                  onChange={(e) => setChatInput(e.target.value)}
-                />
-                <button className="primary" onClick={handleChatSend}>
-                  Send
-                </button>
+                <div className="chat-input-area">
+                  <textarea
+                    className="input chat-input"
+                    rows={3}
+                    placeholder="Ask anything: general topics, math, coding, online-style summaries, or project data"
+                    value={chatInput}
+                    onChange={(e) => setChatInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        handleChatSend();
+                      }
+                    }}
+                  />
+                  <button className="primary" onClick={handleChatSend}>
+                    Send
+                  </button>
+                </div>
                 {chatStatus ? <p className="hint">{chatStatus}</p> : null}
               </>
             )}
             </div>
 
-            <div className="card span-2">
-            <h3>
-              <Clock3 size={16} /> 3 Day Flood Forecast (Selected Area)
-            </h3>
-            {selected?.forecast_steps && selected.forecast_steps.length > 0 ? (
-              <div className="forecast-timeline">
-                {(selected.short_forecast_steps?.length ? selected.short_forecast_steps : selected.forecast_steps.slice(0, 3)).map((step, idx) => (
-                  <div key={idx} className="forecast-step">
-                    <div className="step-time">{formatForecastLabel(step.time)}</div>
-                    <div className="step-bar">
-                      <div
-                        className="step-fill"
-                        style={{ width: `${Math.max(14, Math.min(step.trend, 100))}%` }}
-                      />
-                    </div>
-                    <div className="step-rain">{Math.round(step.trend)}%</div>
-                    <div className={`step-level ${trendBand(step.trend)}`}>{riskLabel(trendBand(step.trend))}</div>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="hint">No forecast data available</p>
-            )}
-          </div>
+
         </div>
       </section>
 
       <section className="bottom-strip">
         <div className="bottom-main">
           <div className="card chart-card">
-            <h3>3 Day Risk Graph (Selected Area)</h3>
-            {selected ? <p className="hint">{selected.name}</p> : null}
+            <h3>7 Day Risk Trend Analysis (Selected Area)</h3>
+            {selected ? (
+              <>
+                <p className="hint">{selected.name} - Risk Score: {selected.risk_score}/100</p>
+                <p className="chart-formula">Risk = f(Rain₁ₕ×6 + Rain₆ₕ×1.8 + Rain₂₄ₕ×0.7 + Wind×0.8 + NASA×0.9 + River×0.03)</p>
+              </>
+            ) : null}
             <div className="chart-wrap">
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={forecastTrendData} margin={{ top: 14, right: 16, bottom: 4, left: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="rgba(15, 23, 42, 0.2)" />
                   <XAxis dataKey="label" tick={{ fontSize: 11 }} interval={0} />
-                  <YAxis tick={{ fontSize: 11 }} domain={[0, 100]} />
+                  <YAxis tick={{ fontSize: 11 }} domain={[0, 100]} label={{ value: 'Risk %', angle: -90, position: 'insideLeft' }} />
                   <Tooltip
                     formatter={(value: number) => [`${value}%`, "Risk trend"]}
                     labelFormatter={(label) => `Day: ${label}`}
@@ -871,7 +963,7 @@ export default function App() {
               <div className="weather-grid">
                 {weatherForecast.map((item, idx) => (
                   <div key={`${item.time}-${idx}`} className={`weather-item ${item.tone}`}>
-                    <div className="weather-day">{formatForecastLabel(item.time)}</div>
+                    <div className="weather-day">{formatForecastLabel(item.display_time)}</div>
                     <item.Icon size={18} className="weather-icon" />
                     <div className="weather-label">{item.label}</div>
                     <div className="weather-meta">
@@ -889,14 +981,33 @@ export default function App() {
         </div>
 
         <div className="card emergency-card">
-          <h3>Bangladesh Emergency Contacts</h3>
-          {bdEmergencyContacts.map((c) => (
-            <p key={c.name}>
-              <strong>{c.name}:</strong> {c.value}
-            </p>
-          ))}
+          <h3>🚨 Bangladesh Emergency Contacts</h3>
+          <div className="emergency-grid">
+            {bdEmergencyContacts.map((c) => (
+              <a key={c.name} href={c.link} className="emergency-item">
+                <div className="emergency-name">{c.name}</div>
+                <div className="emergency-value">{c.value}</div>
+              </a>
+            ))}
+          </div>
         </div>
       </section>
+
+      <footer className="footer">
+        <div className="footer-content">
+          <div className="footer-team">
+            <div className="team-member">
+              <strong>Developer:</strong> <a href="https://redoyanulhaque.me" target="_blank" rel="noopener noreferrer">Redoyanul Haque</a>
+            </div>
+            <div className="team-member">
+              <strong>Teammate:</strong> Debmalya Dutta Teertha
+            </div>
+          </div>
+          <div className="footer-note">
+            Educational flood forecasting assistant - Not an official disaster warning system
+          </div>
+        </div>
+      </footer>
     </div>
   );
 }

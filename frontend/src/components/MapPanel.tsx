@@ -473,7 +473,7 @@ export default function MapPanel({
               : mode === "wind"
                 ? gradientColorByValue(p.wind_kmh, 0, 80)
                 : levelColor[p.risk_level],
-          radius: p.is_true_flood_signal ? 18 : Math.max(8, p.risk_score / 6)
+          radius: p.is_true_flood_signal ? 22 : Math.max(10, p.risk_score / 5.5)
         }
       }))
     }),
@@ -498,7 +498,7 @@ export default function MapPanel({
               : mode === "wind"
                 ? gradientColorByValue(p.wind_kmh, 0, 80)
                 : levelColor[p.risk_level],
-          radius: Math.max(3.6, p.risk_score / 12)
+          radius: Math.max(4.5, p.risk_score / 10)
         }
       }))
     }),
@@ -517,7 +517,7 @@ export default function MapPanel({
         properties: {
           ...point,
           color: "#0ea5e9",
-          radius: Math.max(4.2, point.risk_score / 10),
+          radius: Math.max(5.5, point.risk_score / 8.5),
           river_name: point.river_name || "River Watch"
         }
       }))
@@ -625,7 +625,7 @@ export default function MapPanel({
           is_true_flood_signal: true,
           source_point: String(event.source || "Live Flood Feed"),
           color: "#7f1d1d",
-          radius: event.severity === "emergency" ? 13 : event.severity === "warning" ? 11 : 9
+          radius: event.severity === "emergency" ? 16 : event.severity === "warning" ? 13 : 11
         }
       }))
     }),
@@ -773,7 +773,7 @@ export default function MapPanel({
         filter: ["all", ["!", ["get", "is_no_data"]], [">=", ["get", "risk_score"], 45]],
         paint: {
           "circle-color": ["get", "color"],
-          "circle-radius": ["interpolate", ["linear"], ["zoom"], 1, 2.2, 4.8, 5],
+          "circle-radius": ["interpolate", ["linear"], ["zoom"], 1, 3.2, 4.8, 6.5],
           "circle-opacity": 0.86,
           "circle-stroke-color": "#ffffff",
           "circle-stroke-width": 0.95
@@ -788,7 +788,7 @@ export default function MapPanel({
         maxzoom: 9.15,
         paint: {
           "circle-color": ["get", "color"],
-          "circle-radius": ["interpolate", ["linear"], ["get", "risk_score"], 0, 5, 100, 12],
+          "circle-radius": ["interpolate", ["linear"], ["get", "risk_score"], 0, 6, 100, 14],
           "circle-opacity": ["case", ["==", ["get", "is_no_data"], true], 0.52, 0.9],
           "circle-stroke-color": "#ffffff",
           "circle-stroke-width": 1.45
@@ -804,7 +804,7 @@ export default function MapPanel({
         filter: ["all", ["!", ["get", "is_no_data"]], [">=", ["get", "risk_score"], 45]],
         paint: {
           "circle-color": ["get", "color"],
-          "circle-radius": ["interpolate", ["linear"], ["zoom"], 4, 2.8, 6.3, 4.3],
+          "circle-radius": ["interpolate", ["linear"], ["zoom"], 4, 3.5, 6.3, 5.5],
           "circle-opacity": ["case", ["==", ["get", "is_no_data"], true], 0.22, 0.75],
           "circle-stroke-color": "#ffffff",
           "circle-stroke-width": 0.9
@@ -831,7 +831,7 @@ export default function MapPanel({
         minzoom: 5.5,
         paint: {
           "circle-color": ["get", "color"],
-          "circle-radius": ["interpolate", ["linear"], ["zoom"], 5.5, 4.2, 12, 8],
+          "circle-radius": ["interpolate", ["linear"], ["zoom"], 5.5, 5.5, 12, 10],
           "circle-opacity": 0.85,
           "circle-stroke-color": "#0369a1",
           "circle-stroke-width": 1.6
@@ -867,7 +867,7 @@ export default function MapPanel({
         minzoom: 9.15,
         paint: {
           "circle-color": ["get", "color"],
-          "circle-radius": ["interpolate", ["linear"], ["zoom"], 9.2, 5.6, 12, 8],
+          "circle-radius": ["interpolate", ["linear"], ["zoom"], 9.2, 6.5, 12, 9.5],
           "circle-opacity": ["case", ["==", ["get", "is_no_data"], true], 0.55, 0.95],
           "circle-stroke-color": "#ffffff",
           "circle-stroke-width": 1.25
@@ -892,7 +892,7 @@ export default function MapPanel({
         source: "global-flood-events",
         paint: {
           "circle-color": "rgba(127, 29, 29, 0.22)",
-          "circle-radius": ["interpolate", ["linear"], ["zoom"], 1, 20, 5, 34, 10, 48],
+          "circle-radius": ["interpolate", ["linear"], ["zoom"], 1, 24, 5, 38, 10, 56],
           "circle-opacity": 0.9,
           "circle-blur": 0.68,
           "circle-stroke-color": "rgba(127, 29, 29, 0.36)",
@@ -906,7 +906,7 @@ export default function MapPanel({
         source: "global-flood-events",
         paint: {
           "circle-color": "rgba(120, 18, 18, 0.12)",
-          "circle-radius": ["interpolate", ["linear"], ["zoom"], 1, 28, 5, 46, 10, 62],
+          "circle-radius": ["interpolate", ["linear"], ["zoom"], 1, 32, 5, 52, 10, 72],
           "circle-opacity": 0.88,
           "circle-blur": 0.58
         }
@@ -918,7 +918,7 @@ export default function MapPanel({
         source: "global-flood-events",
         paint: {
           "circle-color": "#991b1b",
-          "circle-radius": ["interpolate", ["linear"], ["zoom"], 1, 7.5, 5, 12, 10, 18],
+          "circle-radius": ["interpolate", ["linear"], ["zoom"], 1, 9, 5, 14, 10, 21],
           "circle-opacity": 0.92,
           "circle-stroke-color": "#fee2e2",
           "circle-stroke-width": 1.6

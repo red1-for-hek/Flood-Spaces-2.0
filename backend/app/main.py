@@ -82,13 +82,52 @@ CITY_SEEDS = [
 MONTHLY_FORECAST_DAYS = 30
 SHORT_FORECAST_DAYS = 7
 
+TELEGRAM_POLL_INTERVAL_SECONDS = 5
+DEFAULT_TELEGRAM_RADIUS_KM = 100
+DEFAULT_TELEGRAM_THRESHOLD = 50
+
+BANGLADESH_DISTRICTS = [
+    "Bagerhat", "Bandarban", "Barguna", "Barishal", "Bhola", "Bogura", "Brahmanbaria", "Chandpur",
+    "Chapai Nawabganj",
+    "Chattogram", "Chuadanga", "Cox's Bazar", "Cumilla", "Dhaka", "Dinajpur", "Faridpur", "Feni",
+    "Gaibandha", "Gazipur", "Gopalganj", "Habiganj", "Jamalpur", "Jashore", "Jhalokathi", "Jhenaidah",
+    "Joypurhat", "Khagrachhari", "Khulna", "Kishoreganj", "Kurigram", "Kushtia", "Lakshmipur",
+    "Lalmonirhat", "Madaripur", "Magura", "Manikganj", "Meherpur", "Moulvibazar", "Munshiganj",
+    "Mymensingh", "Naogaon", "Narail", "Narayanganj", "Narsingdi", "Natore", "Netrokona", "Nilphamari",
+    "Noakhali", "Pabna", "Panchagarh", "Patuakhali", "Pirojpur", "Rajbari", "Rajshahi", "Rangamati",
+    "Rangpur", "Satkhira", "Shariatpur", "Sherpur", "Sirajganj", "Sunamganj", "Sylhet", "Tangail",
+    "Thakurgaon",
+]
+
+TELEGRAM_MAIN_MENU_EN = [
+    "Turn On Alerts",
+    "Turn Off Alerts",
+    "Set Radius",
+    "Set Threshold",
+    "AI Summary (Selected Area)",
+    "Change Region",
+    "My Settings",
+    "Help",
+]
+
+TELEGRAM_MAIN_MENU_BN = [
+    "অ্যালার্ট চালু করুন",
+    "অ্যালার্ট বন্ধ করুন",
+    "রেডিয়াস সেট করুন",
+    "থ্রেশহোল্ড সেট করুন",
+    "এআই সারসংক্ষেপ (নির্বাচিত এলাকা)",
+    "এলাকা পরিবর্তন করুন",
+    "আমার সেটিংস",
+    "সহায়তা",
+]
+
 
 class TelegramSubscription(BaseModel):
     chat_id: str
     lat: float
     lon: float
-    radius_km: float = Field(default=100, ge=5, le=300)
-    threshold: int = Field(default=70, ge=30, le=95)
+    radius_km: float = Field(default=100, ge=10, le=200)
+    threshold: int = Field(default=70, ge=30, le=100)
 
 
 class AIRequest(BaseModel):
@@ -120,6 +159,8 @@ boundary_cache: Dict[str, Dict] = {}
 source_status_cache: Dict[str, Dict] = {}
 global_flood_cache: Dict[str, Dict] = {}
 river_watch_cache: Dict[str, Dict] = {}
+telegram_profiles: Dict[str, Dict] = {}
+telegram_runtime_state: Dict[str, Dict] = {"last_update_id": 0}
 
 
 def build_openmeteo_client() -> openmeteo_requests.Client | None:
@@ -1925,19 +1966,460 @@ async def bd_river_watch() -> Dict:
 
 
 @app.post("/api/alerts/subscribe")
-def alerts_subscribe(body: TelegramSubscription) -> Dict:
-    subscriptions.append(body)
+async def alerts_subscribe(body: TelegramSubscription) -> Dict:
+    update_or_insert_subscription(body)
+
+    profile = ensure_telegram_profile(body.chat_id)
+    profile["lat"] = body.lat
+    profile["lon"] = body.lon
+    profile["radius_km"] = int(round(body.radius_km))
+    profile["threshold"] = int(body.threshold)
+    profile["alerts_enabled"] = True
+    if not profile.get("selected_region"):
+        profile["selected_region"] = await reverse_geocode_name(body.lat, body.lon)
+
+    greeting = (
+        "Assalamualaikum. Flood Spaces by Tech Father alert subscription is active.\n"
+        f"Area: {profile.get('selected_region') or 'Selected Area'}\n"
+        f"Radius: {profile['radius_km']} km | Threshold: {profile['threshold']}\n"
+        "You can change settings anytime from bot menu."
+    )
+    await send_telegram(
+        body.chat_id,
+        await maybe_translate_for_language(greeting, profile.get("language", "en")),
+        reply_markup=main_menu_keyboard(profile.get("language", "en")),
+    )
     return {"ok": True, "total_subscriptions": len(subscriptions)}
 
 
-async def send_telegram(chat_id: str, text: str) -> None:
-    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+def telegram_token() -> str:
+    return os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+
+
+def chunked(items: List[str], size: int) -> List[List[str]]:
+    return [items[idx : idx + size] for idx in range(0, len(items), size)]
+
+
+def build_reply_keyboard(options: List[str], columns: int = 2, one_time: bool = False) -> Dict:
+    return {
+        "keyboard": chunked(options, columns),
+        "resize_keyboard": True,
+        "one_time_keyboard": one_time,
+    }
+
+
+def districts_keyboard() -> Dict:
+    return build_reply_keyboard(BANGLADESH_DISTRICTS, columns=4, one_time=False)
+
+
+def language_keyboard() -> Dict:
+    return build_reply_keyboard(["English", "বাংলা"], columns=2, one_time=True)
+
+
+def main_menu_keyboard(language: str) -> Dict:
+    options = TELEGRAM_MAIN_MENU_BN if language == "bn" else TELEGRAM_MAIN_MENU_EN
+    return build_reply_keyboard(options, columns=2, one_time=False)
+
+
+def ensure_telegram_profile(chat_id: str) -> Dict:
+    profile = telegram_profiles.get(chat_id)
+    if profile:
+        return profile
+
+    profile = {
+        "chat_id": chat_id,
+        "language": "en",
+        "selected_region": None,
+        "lat": None,
+        "lon": None,
+        "radius_km": DEFAULT_TELEGRAM_RADIUS_KM,
+        "threshold": DEFAULT_TELEGRAM_THRESHOLD,
+        "alerts_enabled": False,
+        "pending": "region",
+    }
+    telegram_profiles[chat_id] = profile
+    return profile
+
+
+def update_or_insert_subscription(sub: TelegramSubscription) -> None:
+    for idx, existing in enumerate(subscriptions):
+        if existing.chat_id == sub.chat_id:
+            subscriptions[idx] = sub
+            return
+    subscriptions.append(sub)
+
+
+def remove_subscription(chat_id: str) -> None:
+    subscriptions[:] = [sub for sub in subscriptions if sub.chat_id != chat_id]
+
+
+async def send_telegram(chat_id: str, text: str, reply_markup: Dict | None = None) -> None:
+    token = telegram_token()
     if not token:
         return
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload: Dict = {"chat_id": chat_id, "text": text}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+
+    async with httpx.AsyncClient(timeout=12) as client:
+        await client.post(url, json=payload)
+
+
+async def maybe_translate_for_language(text: str, language: str) -> str:
+    if language != "bn":
+        return text
+
+    prompt = (
+        "Translate the following text to natural Bengali. "
+        "Keep numbers, district names, and units unchanged. Return only Bengali text."
+    )
+    translated = await openrouter_chat_completion(
+        [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": text},
+        ],
+        temperature=0.0,
+        max_tokens=min(900, max(180, len(text) * 2)),
+        profile="fast",
+    )
+    candidate = str(translated.get("text", "")).strip()
+    return candidate or text
+
+
+async def resolve_region_coordinates(region: str) -> tuple[float, float, str] | None:
+    target = region.strip()
+    if not target:
+        return None
+
+    for city in CITY_SEEDS:
+        if city["name"].lower() == target.lower():
+            return (float(city["lat"]), float(city["lon"]), city["name"])
+
+    results = await geocode_nominatim(f"{target}, Bangladesh", limit=1, bd_only=True)
+    if not results:
+        results = await geocode_nominatim(target, limit=1, bd_only=False)
+    if not results:
+        return None
+
+    top = results[0]
+    return (float(top["lat"]), float(top["lon"]), str(top.get("name_en") or top.get("name") or target))
+
+
+def parse_number(value: str) -> float | None:
+    try:
+        return float(value.strip())
+    except Exception:
+        return None
+
+
+def extract_area_from_temperature_query(text: str) -> str | None:
+    lower = text.lower().strip()
+    patterns = [
+        r"(?:temperature|temp)\s+(?:of|in)\s+([a-zA-Z\s\-'.]+)",
+        r"weather\s+(?:of|in)\s+([a-zA-Z\s\-'.]+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, lower)
+        if match:
+            area = re.sub(r"\s+", " ", match.group(1)).strip(" .,")
+            if area:
+                return area.title()
+    return None
+
+
+def bot_help_text(language: str) -> str:
+    if language == "bn":
+        return (
+            "কমান্ডসমূহ:\n"
+            "/start - বট সেটআপ শুরু\n"
+            "/help - সহায়তা\n"
+            "/summary - নির্বাচিত এলাকার AI সারসংক্ষেপ\n"
+            "/settings - বর্তমান সেটিংস\n"
+            "আপনি যেকোনো সাধারণ প্রশ্নও করতে পারেন (যেমন: Rangpur temperature)."
+        )
+    return (
+        "Commands:\n"
+        "/start - Start bot setup\n"
+        "/help - Help\n"
+        "/summary - AI summary for selected area\n"
+        "/settings - Current settings\n"
+        "You can also ask any general question (example: temperature of Rangpur)."
+    )
+
+
+def profile_settings_text(profile: Dict) -> str:
+    area = profile.get("selected_region") or "Not selected"
+    return (
+        f"Region: {area}\n"
+        f"Language: {'Bengali' if profile.get('language') == 'bn' else 'English'}\n"
+        f"Alerts: {'ON' if profile.get('alerts_enabled') else 'OFF'}\n"
+        f"Radius: {profile.get('radius_km', DEFAULT_TELEGRAM_RADIUS_KM)} km\n"
+        f"Threshold: {profile.get('threshold', DEFAULT_TELEGRAM_THRESHOLD)}"
+    )
+
+
+async def send_ai_summary_for_profile(chat_id: str, profile: Dict) -> None:
+    lat = profile.get("lat")
+    lon = profile.get("lon")
+    area = profile.get("selected_region")
+    if lat is None or lon is None or not area:
+        base_text = "Please select your region first." if profile.get("language") != "bn" else "দয়া করে আগে আপনার এলাকা নির্বাচন করুন।"
+        await send_telegram(chat_id, base_text, reply_markup=main_menu_keyboard(profile.get("language", "en")))
+        return
+
+    point = await location_risk(float(lat), float(lon), name=str(area))
+    summary_payload = AIRequest(
+        area_name=str(point.get("name", area)),
+        risk_score=float(point.get("risk_score", 0.0)),
+        rainfall_24h_mm=float(point.get("rainfall_24h_mm", 0.0)),
+        wind_kmh=float(point.get("wind_kmh", 0.0)),
+        satellite_water_anomaly=float(point.get("satellite_water_anomaly", 0.0)),
+        river_discharge_m3s=float(point.get("river_discharge_m3s", 0.0)),
+        confidence_pct=int(point.get("confidence_pct", 50)),
+        forecast_steps=list(point.get("forecast_steps", [])),
+    )
+    summary = await ai_summary(summary_payload)
+    text = str(summary.get("summary", "No summary returned."))
+    text = await maybe_translate_for_language(text, profile.get("language", "en"))
+    await send_telegram(chat_id, text, reply_markup=main_menu_keyboard(profile.get("language", "en")))
+
+
+async def answer_temperature_query(chat_id: str, profile: Dict, area: str) -> None:
+    resolved = await resolve_region_coordinates(area)
+    if not resolved:
+        base_text = f"I could not find '{area}'. Try another area name."
+        base_text = await maybe_translate_for_language(base_text, profile.get("language", "en"))
+        await send_telegram(chat_id, base_text, reply_markup=main_menu_keyboard(profile.get("language", "en")))
+        return
+
+    lat, lon, pretty_name = resolved
+    point = await location_risk(lat, lon, name=pretty_name)
+    response = (
+        f"{point.get('name', pretty_name)} now:\n"
+        f"Temperature: {point.get('temperature_c', 'n/a')} C\n"
+        f"Rain (24h): {point.get('rainfall_24h_mm', 0)} mm\n"
+        f"Wind: {point.get('wind_kmh', 0)} km/h\n"
+        f"Risk: {str(point.get('risk_level', 'unknown')).upper()} ({point.get('risk_score', 0)}/100)"
+    )
+    response = await maybe_translate_for_language(response, profile.get("language", "en"))
+    await send_telegram(chat_id, response, reply_markup=main_menu_keyboard(profile.get("language", "en")))
+
+
+async def answer_general_bot_chat(chat_id: str, profile: Dict, user_text: str) -> None:
+    selected_area = profile.get("selected_region") or "Not selected"
+    system_prompt = (
+        "You are Flood Spaces Telegram assistant. Answer fast and clearly in Markdown. "
+        "You can answer any general question, and also project data questions. "
+        f"User selected area: {selected_area}."
+    )
+    ai_result = await openrouter_chat_completion(
+        [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_text},
+        ],
+        temperature=0.3,
+        max_tokens=320,
+        profile="fast",
+    )
+    text = str(ai_result.get("text", "No reply returned."))
+    text = await maybe_translate_for_language(text, profile.get("language", "en"))
+    await send_telegram(chat_id, text, reply_markup=main_menu_keyboard(profile.get("language", "en")))
+
+
+async def handle_telegram_message(chat_id: str, text: str) -> None:
+    raw_text = text.strip()
+    if not raw_text:
+        return
+
+    profile = ensure_telegram_profile(chat_id)
+    lang = profile.get("language", "en")
+    lower = raw_text.lower()
+
+    if lower.startswith("/start"):
+        profile["pending"] = "region"
+        welcome = (
+            "Welcome to Flood Spaces Bot. Please select your district first."
+            if lang != "bn"
+            else "Flood Spaces বটে স্বাগতম। আগে আপনার জেলা নির্বাচন করুন।"
+        )
+        await send_telegram(chat_id, welcome, reply_markup=districts_keyboard())
+        return
+
+    if lower.startswith("/help") or raw_text in {"Help", "সহায়তা"}:
+        await send_telegram(chat_id, bot_help_text(lang), reply_markup=main_menu_keyboard(lang))
+        return
+
+    if lower.startswith("/settings") or raw_text in {"My Settings", "আমার সেটিংস"}:
+        settings_text = await maybe_translate_for_language(profile_settings_text(profile), lang)
+        await send_telegram(chat_id, settings_text, reply_markup=main_menu_keyboard(lang))
+        return
+
+    if raw_text in BANGLADESH_DISTRICTS:
+        resolved = await resolve_region_coordinates(raw_text)
+        if not resolved:
+            msg = "Could not resolve this district. Please choose another one."
+            msg = await maybe_translate_for_language(msg, lang)
+            await send_telegram(chat_id, msg, reply_markup=districts_keyboard())
+            return
+
+        lat, lon, region_name = resolved
+        profile["selected_region"] = region_name
+        profile["lat"] = lat
+        profile["lon"] = lon
+        profile["pending"] = "language"
+        msg = "Region saved. Now choose your language." if lang != "bn" else "এলাকা সংরক্ষণ হয়েছে। এখন ভাষা নির্বাচন করুন।"
+        await send_telegram(chat_id, msg, reply_markup=language_keyboard())
+        return
+
+    if raw_text in {"English", "বাংলা", "Bangla", "Bengali"}:
+        profile["language"] = "bn" if raw_text != "English" else "en"
+        profile["pending"] = None
+        lang = profile["language"]
+        msg = "Language set. Use the menu below." if lang != "bn" else "ভাষা সেট হয়েছে। নিচের মেনু ব্যবহার করুন।"
+        await send_telegram(chat_id, msg, reply_markup=main_menu_keyboard(lang))
+        return
+
+    if raw_text in {"Change Region", "এলাকা পরিবর্তন করুন"}:
+        profile["pending"] = "region"
+        prompt = "Select your district." if lang != "bn" else "আপনার জেলা নির্বাচন করুন।"
+        await send_telegram(chat_id, prompt, reply_markup=districts_keyboard())
+        return
+
+    if raw_text in {"Set Radius", "রেডিয়াস সেট করুন"}:
+        profile["pending"] = "radius"
+        prompt = "Send radius in km (10-200)." if lang != "bn" else "রেডিয়াস কিমি-তে দিন (10-200)।"
+        await send_telegram(chat_id, prompt, reply_markup=main_menu_keyboard(lang))
+        return
+
+    if raw_text in {"Set Threshold", "থ্রেশহোল্ড সেট করুন"}:
+        profile["pending"] = "threshold"
+        prompt = "Send threshold value (30-100)." if lang != "bn" else "থ্রেশহোল্ড দিন (30-100)।"
+        await send_telegram(chat_id, prompt, reply_markup=main_menu_keyboard(lang))
+        return
+
+    if profile.get("pending") == "radius":
+        value = parse_number(raw_text)
+        if value is None or value < 10 or value > 200:
+            prompt = "Invalid radius. Enter a number from 10 to 200." if lang != "bn" else "ভুল রেডিয়াস। 10 থেকে 200 এর মধ্যে সংখ্যা দিন।"
+            await send_telegram(chat_id, prompt, reply_markup=main_menu_keyboard(lang))
+            return
+        profile["radius_km"] = int(round(value))
+        profile["pending"] = None
+        done = f"Radius updated to {profile['radius_km']} km."
+        done = await maybe_translate_for_language(done, lang)
+        await send_telegram(chat_id, done, reply_markup=main_menu_keyboard(lang))
+        return
+
+    if profile.get("pending") == "threshold":
+        value = parse_number(raw_text)
+        if value is None or value < 30 or value > 100:
+            prompt = "Invalid threshold. Enter a number from 30 to 100." if lang != "bn" else "ভুল থ্রেশহোল্ড। 30 থেকে 100 এর মধ্যে সংখ্যা দিন।"
+            await send_telegram(chat_id, prompt, reply_markup=main_menu_keyboard(lang))
+            return
+        profile["threshold"] = int(round(value))
+        profile["pending"] = None
+        done = f"Threshold updated to {profile['threshold']}."
+        done = await maybe_translate_for_language(done, lang)
+        await send_telegram(chat_id, done, reply_markup=main_menu_keyboard(lang))
+        return
+
+    if lower.startswith("/summary") or raw_text in {"AI Summary (Selected Area)", "এআই সারসংক্ষেপ (নির্বাচিত এলাকা)"}:
+        await send_ai_summary_for_profile(chat_id, profile)
+        return
+
+    if lower.startswith("/alerts_on") or raw_text in {"Turn On Alerts", "অ্যালার্ট চালু করুন"}:
+        if profile.get("lat") is None or profile.get("lon") is None:
+            msg = "Select your region first to enable alerts." if lang != "bn" else "অ্যালার্ট চালু করতে আগে এলাকা নির্বাচন করুন।"
+            await send_telegram(chat_id, msg, reply_markup=districts_keyboard())
+            return
+
+        sub = TelegramSubscription(
+            chat_id=chat_id,
+            lat=float(profile["lat"]),
+            lon=float(profile["lon"]),
+            radius_km=float(profile.get("radius_km", DEFAULT_TELEGRAM_RADIUS_KM)),
+            threshold=int(profile.get("threshold", DEFAULT_TELEGRAM_THRESHOLD)),
+        )
+        update_or_insert_subscription(sub)
+        profile["alerts_enabled"] = True
+        msg = (
+            f"Alerts enabled for {profile.get('selected_region')}. Radius {profile['radius_km']} km, threshold {profile['threshold']}."
+        )
+        msg = await maybe_translate_for_language(msg, lang)
+        await send_telegram(chat_id, msg, reply_markup=main_menu_keyboard(lang))
+        return
+
+    if lower.startswith("/alerts_off") or raw_text in {"Turn Off Alerts", "অ্যালার্ট বন্ধ করুন"}:
+        remove_subscription(chat_id)
+        profile["alerts_enabled"] = False
+        msg = "Alerts turned off." if lang != "bn" else "অ্যালার্ট বন্ধ করা হয়েছে।"
+        await send_telegram(chat_id, msg, reply_markup=main_menu_keyboard(lang))
+        return
+
+    temp_area = extract_area_from_temperature_query(raw_text)
+    if temp_area:
+        await answer_temperature_query(chat_id, profile, temp_area)
+        return
+
+    await answer_general_bot_chat(chat_id, profile, raw_text)
+
+
+async def configure_telegram_commands() -> None:
+    token = telegram_token()
+    if not token:
+        return
+
+    url = f"https://api.telegram.org/bot{token}/setMyCommands"
+    commands = [
+        {"command": "start", "description": "Start onboarding"},
+        {"command": "help", "description": "Show help"},
+        {"command": "settings", "description": "Show current settings"},
+        {"command": "summary", "description": "AI summary for selected area"},
+        {"command": "alerts_on", "description": "Turn alerts on"},
+        {"command": "alerts_off", "description": "Turn alerts off"},
+    ]
     async with httpx.AsyncClient(timeout=10) as client:
-        await client.post(url, json={"chat_id": chat_id, "text": text})
+        await client.post(url, json={"commands": commands})
+
+
+async def process_telegram_updates() -> None:
+    token = telegram_token()
+    if not token:
+        return
+
+    offset = int(telegram_runtime_state.get("last_update_id", 0)) + 1
+    url = f"https://api.telegram.org/bot{token}/getUpdates"
+    params = {"offset": offset, "limit": 50, "timeout": 0}
+
+    try:
+        async with httpx.AsyncClient(timeout=12) as client:
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+            payload = response.json()
+    except Exception:
+        return
+
+    if not payload.get("ok"):
+        return
+
+    for update in payload.get("result", []):
+        update_id = int(update.get("update_id", 0))
+        if update_id > int(telegram_runtime_state.get("last_update_id", 0)):
+            telegram_runtime_state["last_update_id"] = update_id
+
+        message = update.get("message") or update.get("edited_message")
+        if not isinstance(message, dict):
+            continue
+
+        chat = message.get("chat", {}) if isinstance(message.get("chat"), dict) else {}
+        chat_id = str(chat.get("id", "")).strip()
+        text = str(message.get("text", "")).strip()
+        if not chat_id or not text:
+            continue
+
+        await handle_telegram_message(chat_id, text)
 
 
 async def process_alert_checks() -> Dict:
@@ -1964,7 +2446,10 @@ async def process_alert_checks() -> Dict:
                 f"Rain 24h: {point['rainfall_24h_mm']} mm | Wind: {point['wind_kmh']} km/h\n"
                 f"Distance from your location: {round(top[0], 1)} km"
             )
-            await send_telegram(sub.chat_id, message)
+            profile = telegram_profiles.get(sub.chat_id, {})
+            language = profile.get("language", "en") if isinstance(profile, dict) else "en"
+            message = await maybe_translate_for_language(message, language)
+            await send_telegram(sub.chat_id, message, reply_markup=main_menu_keyboard(language))
             sent += 1
 
     return {"ok": True, "alerts_sent": sent}
@@ -1978,9 +2463,24 @@ async def alerts_check() -> Dict:
 @app.on_event("startup")
 async def startup_event() -> None:
     # Background checks keep alerts automatic without manual trigger.
+    has_telegram = bool(telegram_token())
+
     if not scheduler.running:
-        scheduler.add_job(process_alert_checks, "interval", minutes=5)
+        scheduler.add_job(process_alert_checks, "interval", minutes=5, id="alert-checks", replace_existing=True)
+        if has_telegram:
+            scheduler.add_job(
+                process_telegram_updates,
+                "interval",
+                seconds=TELEGRAM_POLL_INTERVAL_SECONDS,
+                id="telegram-poll",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+            )
         scheduler.start()
+
+    if has_telegram:
+        await configure_telegram_commands()
 
 
 @app.on_event("shutdown")

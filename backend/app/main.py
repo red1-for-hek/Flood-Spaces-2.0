@@ -2,6 +2,7 @@ import math
 import os
 import asyncio
 import re
+import html
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Dict, List, Literal, Tuple
@@ -278,6 +279,109 @@ def local_ai_fallback(messages: List[Dict[str, str]]) -> str:
         "Local AI fallback (OpenRouter unavailable): I can still help with general questions and project questions. "
         "For live web updates, I can provide guidance but may not have real-time browsing."
     )
+
+
+def is_simple_greeting(text: str) -> bool:
+    lowered = text.strip().lower()
+    return bool(re.fullmatch(r"(hi+|hello+|hey+|yo+|yoo+|yooo+)(\s+flood\s*spaces)?[!.\s]*", lowered))
+
+
+def wants_web_context(text: str) -> bool:
+    lowered = text.lower()
+    realtime_tokens = [
+        "today",
+        "latest",
+        "current",
+        "now",
+        "news",
+        "live",
+        "price",
+        "temperature",
+        "weather",
+        "who won",
+        "update",
+        "happening",
+    ]
+    return any(token in lowered for token in realtime_tokens)
+
+
+async def fetch_web_context(query: str) -> str:
+    # Lightweight public web snapshot. Optional and best-effort only.
+    url = "https://api.duckduckgo.com/"
+    params = {
+        "q": query,
+        "format": "json",
+        "no_html": 1,
+        "skip_disambig": 1,
+        "no_redirect": 1,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+    except Exception:
+        return ""
+
+    parts: List[str] = []
+    abstract = str(data.get("AbstractText", "")).strip()
+    if abstract:
+        parts.append(f"Abstract: {abstract}")
+
+    heading = str(data.get("Heading", "")).strip()
+    if heading and not abstract:
+        parts.append(f"Heading: {heading}")
+
+    source_url = str(data.get("AbstractURL", "")).strip()
+    if source_url:
+        parts.append(f"Source: {source_url}")
+
+    related = data.get("RelatedTopics", [])
+    if isinstance(related, list):
+        snippets = []
+        for item in related[:3]:
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("Text", "")).strip()
+            if text:
+                snippets.append(text)
+        if snippets:
+            parts.append("Related: " + " | ".join(snippets))
+
+    return "\n".join(parts).strip()
+
+
+def markdown_to_telegram_html(text: str) -> str:
+    src = text.replace("\r", "").strip()
+    if not src:
+        return ""
+
+    lines = src.split("\n")
+    out_lines: List[str] = []
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            out_lines.append("")
+            continue
+
+        if line.startswith("### ") or line.startswith("## ") or line.startswith("# "):
+            heading_text = line.lstrip("#").strip()
+            line = f"<b>{html.escape(heading_text)}</b>"
+            out_lines.append(line)
+            continue
+
+        if line.startswith("- ") or line.startswith("* "):
+            bullet_text = html.escape(line[2:].strip())
+            out_lines.append(f"• {bullet_text}")
+            continue
+
+        out_lines.append(html.escape(line))
+
+    merged = "\n".join(out_lines)
+    merged = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", merged)
+    merged = re.sub(r"__(.+?)__", r"<b>\1</b>", merged)
+    merged = re.sub(r"`([^`]+)`", r"<code>\1</code>", merged)
+    return merged
 
 
 def openrouter_model_candidates(profile: Literal["fast", "balanced"] = "fast") -> List[str]:
@@ -2059,12 +2163,28 @@ async def send_telegram(chat_id: str, text: str, reply_markup: Dict | None = Non
         return
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload: Dict = {"chat_id": chat_id, "text": text}
+    formatted_html = markdown_to_telegram_html(text)
+    payload: Dict = {
+        "chat_id": chat_id,
+        "text": formatted_html if formatted_html else text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
     if reply_markup:
         payload["reply_markup"] = reply_markup
 
     async with httpx.AsyncClient(timeout=12) as client:
-        await client.post(url, json=payload)
+        response = await client.post(url, json=payload)
+        if response.status_code >= 400:
+            # Fallback to plain text if Telegram rejects formatting.
+            fallback = {
+                "chat_id": chat_id,
+                "text": text,
+                "disable_web_page_preview": True,
+            }
+            if reply_markup:
+                fallback["reply_markup"] = reply_markup
+            await client.post(url, json=fallback)
 
 
 async def maybe_translate_for_language(text: str, language: str) -> str:
@@ -2208,19 +2328,30 @@ async def answer_temperature_query(chat_id: str, profile: Dict, area: str) -> No
 
 
 async def answer_general_bot_chat(chat_id: str, profile: Dict, user_text: str) -> None:
+    if is_simple_greeting(user_text):
+        hello = "Hello, how can I assist you? I am FloodSpaces AI."
+        hello = await maybe_translate_for_language(hello, profile.get("language", "en"))
+        await send_telegram(chat_id, hello, reply_markup=main_menu_keyboard(profile.get("language", "en")))
+        return
+
     selected_area = profile.get("selected_region") or "Not selected"
+    web_context = await fetch_web_context(user_text) if wants_web_context(user_text) else ""
     system_prompt = (
-        "You are Flood Spaces Telegram assistant. Answer fast and clearly in Markdown. "
+        "You are Flood Spaces Telegram assistant. Answer fast and clearly. "
         "You can answer any general question, and also project data questions. "
+        "Default style: 1-3 short lines. Do not write long paragraphs unless user asks for details. "
         f"User selected area: {selected_area}."
     )
+    if web_context:
+        system_prompt += f" Web snapshot (may be partial): {web_context}."
+
     ai_result = await openrouter_chat_completion(
         [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_text},
         ],
-        temperature=0.3,
-        max_tokens=320,
+        temperature=0.2,
+        max_tokens=180,
         profile="fast",
     )
     text = str(ai_result.get("text", "No reply returned."))
@@ -2543,9 +2674,9 @@ async def ai_chat(body: AIChatRequest) -> Dict:
             last_user_message = str(message.get("content", "")).strip().lower()
             break
 
-    if re.fullmatch(r"(hi+|hello+|hey+|yo+|yoo+|yooo+)[!.\s]*", last_user_message):
+    if is_simple_greeting(last_user_message):
         return {
-            "reply": "Hi. What do you want to do next? You can ask me anything, including general topics or Flood Spaces project data.",
+            "reply": "Hello, how can I assist you? I am FloodSpaces AI.",
             "provider": "local-fast-greeting",
             "provider_live": True,
             "provider_model": "instant-rule",
@@ -2571,17 +2702,20 @@ async def ai_chat(body: AIChatRequest) -> Dict:
     )
     wants_selected_area = bool(re.search(r"\b(this area|selected area|current area|this zone|here)\b", last_user_message))
     project_mode = any(keyword in last_user_message for keyword in project_keywords) or wants_selected_area
+    web_context = await fetch_web_context(last_user_message) if wants_web_context(last_user_message) else ""
 
     if project_mode:
         system_prompt = (
             "You are a helpful assistant for Flood Spaces and flood-risk guidance. "
             "For flood/project questions, provide practical, actionable answers. "
             "Return Markdown with short headings or bullets when useful. "
-            "Keep default responses concise (under 140 words) unless the user asks for detail. "
+            "Keep default responses concise (1-4 short lines) unless the user asks for detail. "
             "Do not output LaTeX."
         )
         if body.area_name:
             system_prompt += f" Current selected area: {body.area_name}."
+        if web_context:
+            system_prompt += f" Web snapshot (may be partial): {web_context}."
     else:
         system_prompt = (
             "You are a fast, general-purpose AI assistant. "
@@ -2590,14 +2724,16 @@ async def ai_chat(body: AIChatRequest) -> Dict:
             "Return clear Markdown (lists, bold highlights) when useful. "
             "If the user sends only a greeting, reply in one short friendly line and ask what they need. "
             "Do not output long capability lists unless asked. "
-            "Keep default responses concise (under 120 words) unless the user asks for depth. "
+            "Keep default responses concise (1-4 short lines) unless the user asks for depth. "
             "Do not output LaTeX unless the user explicitly asks for math notation."
         )
+        if web_context:
+            system_prompt += f" Web snapshot (may be partial): {web_context}."
 
     reply = await openrouter_chat_completion(
         [{"role": "system", "content": system_prompt}, *user_messages],
-        temperature=0.35,
-        max_tokens=420,
+        temperature=0.2,
+        max_tokens=220,
         profile="fast",
     )
     return {

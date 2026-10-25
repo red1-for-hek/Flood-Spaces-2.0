@@ -151,7 +151,7 @@ Manual linking is still possible from the dashboard via **Link a chat ID manuall
 
 ### Persistence
 
-Subscribers live in `backend/data/telegram_store.json`. On Render, the blueprint mounts a 1 GB disk at that path. Without persistent storage, subscribers are lost when the process restarts.
+Subscribers live in `backend/data/telegram_store.json`. On Render's **paid** plan you can mount a disk there so they survive restarts; on the **free** plan the filesystem is ephemeral, so a redeploy or restart clears the list and users re-press **Start**. Keeping the service awake with a 5-minute ping (below) avoids restarts while it runs.
 
 ---
 
@@ -186,7 +186,7 @@ If a CARTO URL is configured **without** a key, the app detects it, ignores it a
 | Piece | Host | Why |
 | --- | --- | --- |
 | Frontend | **Vercel** | Static Vite build, free, global CDN (config included in `frontend/vercel.json`) |
-| Backend + bot scheduler | **Render / Railway / Fly.io** | Long-running process needed for 24/7 alerts |
+| Backend + bot scheduler | **Render (free Hobby plan, no card)** | Long-running process needed for 24/7 alerts; the free plan needs a 5-min ping |
 
 > **Already on Vercel?** You can keep the API there in webhook mode with an external 5-minute
 > cron hitting `/api/cron/alerts`, but subscribers are lost on cold starts. See
@@ -205,14 +205,18 @@ Project → **Settings → Environment Variables** (add to *Production* and *Pre
 
 Project **Root Directory must be `frontend`**, Framework preset **Vite**, Build `npm run build`, Output `dist` (all set by `frontend/vercel.json`).
 
-### Render (recommended, ~5 minutes)
+### Render (recommended, free, no card)
+
+`render.yaml` deploys on the **free** plan — Render does **not** ask for a card on free. (If you saw a payment prompt, it was the old blueprint, which requested the $7 Starter plan and a disk. Delete that service and redeploy from the updated blueprint.)
 
 1. Push this repo to GitHub.
-2. Render → **New → Blueprint** → select the repo. `render.yaml` is detected.
+2. Render → **New → Blueprint** → select the repo. `render.yaml` is detected, cost shows **$0/month**.
 3. Set secret env vars: `GROQ_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, `FRONTEND_ORIGIN=https://floodspaces.vercel.app`.
-   - Pick the **Starter** plan (or keep Free + external uptime pings — the free tier sleeps and pauses alerts).
 4. Copy the service URL, then on Vercel set `VITE_API_BASE_URL=https://your-service.onrender.com` and redeploy.
-5. Leave `TELEGRAM_WEBHOOK_URL` empty so the bot keeps long-polling (no extra setup).
+5. **Keep it awake (free):** create an UptimeRobot (or cron-job.org) monitor for `https://your-service.onrender.com/api/health` every **5 minutes**. Free Render services spin down after 15 idle minutes — the ping keeps the bot polling and the alert scheduler running around the clock.
+6. Leave `TELEGRAM_WEBHOOK_URL` empty so the bot keeps long-polling (no extra setup).
+
+> The free plan shares **750 instance-hours per workspace per month**. One service running 24/7 uses ~730, so keep only this one always-on; if you already run another always-on free service, pause it or move it elsewhere.
 
 Full walkthrough: [DEPLOYMENT.md](DEPLOYMENT.md).
 

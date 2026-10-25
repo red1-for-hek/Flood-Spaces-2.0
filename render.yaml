@@ -1,19 +1,33 @@
-# Render blueprint — gives the FastAPI backend a real always-on process so the
-# 5-minute alert scheduler and Telegram polling keep running 24/7.
+# Render blueprint — free, card-free deployment.
+#
+# The FREE plan needs no payment method. Two consequences:
+#   1. The service sleeps after 15 minutes without traffic, which also pauses
+#      Telegram polling and the 5-minute alert scheduler. Add a free uptime
+#      monitor (UptimeRobot / cron-job.org) pinging /api/health every 5 minutes
+#      to keep it awake 24/7.
+#   2. Free services cannot mount a persistent disk, so the subscriber store
+#      lives on the (ephemeral) service filesystem. It survives while the
+#      service stays awake; a redeploy or a Render restart resets it and users
+#      simply press Start in the bot again.
+#
+# Want guaranteed persistence? Change `plan` to `starter`, restore the disk
+# block, and keep TELEGRAM_STATE_PATH on the mount path:
+#
+#   disk:
+#     name: flood-spaces-data
+#     mountPath: /opt/render/project/src/backend/data
+#     sizeGB: 1
+#
 services:
   - type: web
     name: flood-spaces-api
     runtime: python
-    plan: starter # free plan sleeps after inactivity and breaks 24/7 alerts
+    plan: free
     rootDir: backend
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /api/health
     autoDeploy: true
-    disk:
-      name: flood-spaces-data
-      mountPath: /opt/render/project/src/backend/data
-      sizeGB: 1
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.2

@@ -1,21 +1,40 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  Activity,
   AlertTriangle,
+  ArrowUpRight,
   Bell,
   Bot,
+  ChevronRight,
   Clock3,
   CloudLightning,
   CloudRain,
   CloudSun,
+  Compass,
+  Droplets,
+  ExternalLink,
+  Gauge,
+  Layers3,
   LocateFixed,
+  Map as MapIcon,
+  MessageSquare,
+  Phone,
+  Radio,
   RefreshCw,
   Search,
-  Sun
+  Send,
+  ShieldCheck,
+  Sparkles,
+  Sun,
+  Waves,
+  Wind,
+  X,
+  Zap
 } from "lucide-react";
 import {
+  Area,
+  AreaChart,
   CartesianGrid,
-  Line,
-  LineChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -24,22 +43,25 @@ import {
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import MapPanel from "./components/MapPanel";
+import RiskGauge from "./components/RiskGauge";
 import LoadingScreen from "./components/LoadingScreen";
 import {
   fetchAiChat,
   fetchAiSummary,
   fetchAreaGrid,
   fetchBdRiverWatch,
+  fetchBotInfo,
   fetchBoundaries,
   fetchGlobalFloodEvents,
   fetchLocationRisk,
   fetchRiskGrid,
   fetchUpstreamStatus,
   geocodePlace,
-  runAlertCheck,
+  sendTestAlert,
+  streamAiChat,
   subscribeTelegram
 } from "./lib/api";
-import type { GeocodeResult, GlobalFloodEvent, RiskPoint, UpstreamStatus } from "./types";
+import type { BotInfo, GeocodeResult, GlobalFloodEvent, RiskPoint, UpstreamStatus } from "./types";
 
 const bdEmergencyContacts = [
   { name: "National Emergency", value: "999", link: "tel:999" },
@@ -47,31 +69,44 @@ const bdEmergencyContacts = [
   { name: "Disaster Management Hotline", value: "1090", link: "tel:1090" },
   { name: "Police Emergency", value: "100", link: "tel:100" },
   { name: "Ambulance Service", value: "199", link: "tel:199" },
-  { name: "Bangladesh Meteorological Dept", value: "+880-2-8130305", link: "tel:+88028130305" },
-  { name: "Flood Forecasting & Warning Centre", value: "+880-2-9552629", link: "tel:+88029552629" },
-  { name: "Coast Guard Emergency", value: "01769-690690", link: "tel:01769690690" }
+  { name: "Flood Forecasting & Warning Centre", value: "02-9552629", link: "tel:+88029552629" },
+  { name: "Coast Guard Emergency", value: "01769-690690", link: "tel:01769690690" },
+  { name: "Bangladesh Meteorological Dept", value: "02-8130305", link: "tel:+88028130305" }
 ];
 
-function levelClass(level: RiskPoint["risk_level"]) {
-  return `risk risk-${level}`;
+type MapMode = "risk" | "rain" | "wind";
+type ChatRole = "assistant" | "user";
+
+const quickPrompts = [
+  "Explain the current risk in my area",
+  "Is it safe to travel today?",
+  "What should I pack in an emergency bag?",
+  "How does the flood model work?"
+];
+
+function levelText(level: RiskPoint["risk_level"] | "low" | "moderate" | "high" | "severe") {
+  return level === "low" ? "Normal" : level.charAt(0).toUpperCase() + level.slice(1);
 }
 
-function riskLabel(level: RiskPoint["risk_level"] | "low" | "moderate" | "high" | "severe") {
-  return level === "low" ? "NORMAL" : level.toUpperCase();
+function riskBandFromScore(score: number): "low" | "moderate" | "high" | "severe" {
+  if (score < 45) return "low";
+  if (score < 68) return "moderate";
+  if (score < 84) return "high";
+  return "severe";
 }
 
 function formatForecastLabel(time: string): string {
   if (/^\d{4}-\d{2}-\d{2}$/.test(time)) {
     const [year, month, day] = time.split("-").map((value) => Number(value));
-    const localDate = new Date(year, month - 1, day, 12, 0, 0, 0);
-    return localDate.toLocaleDateString(undefined, { weekday: "short", day: "numeric" });
+    return new Date(year, month - 1, day, 12).toLocaleDateString(undefined, {
+      weekday: "short",
+      day: "numeric"
+    });
   }
-
   const parsed = new Date(time);
-  if (Number.isNaN(parsed.getTime())) {
-    return time;
-  }
-  return parsed.toLocaleDateString(undefined, { weekday: "short", day: "numeric" });
+  return Number.isNaN(parsed.getTime())
+    ? time
+    : parsed.toLocaleDateString(undefined, { weekday: "short", day: "numeric" });
 }
 
 function forecastIsoFromTodayOffset(offset: number): string {
@@ -81,89 +116,50 @@ function forecastIsoFromTodayOffset(offset: number): string {
   return base.toISOString();
 }
 
-function trendBand(trend: number): "low" | "moderate" | "high" | "severe" {
-  if (trend < 30) {
-    return "low";
-  }
-  if (trend < 55) {
-    return "moderate";
-  }
-  if (trend < 75) {
-    return "high";
-  }
-  return "severe";
-}
-
-function riskBandFromScore(score: number): "low" | "moderate" | "high" | "severe" {
-  if (score < 45) {
-    return "low";
-  }
-  if (score < 68) {
-    return "moderate";
-  }
-  if (score < 84) {
-    return "high";
-  }
-  return "severe";
-}
-
 function formatEventTime(value: string): string {
   const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) {
-    return value;
-  }
-  return parsed.toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit"
-  });
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
-function weatherVisual(trend: number, windKmh: number): { label: string; tone: "clear" | "cloudy" | "rain" | "storm"; Icon: typeof Sun } {
-  if (trend >= 80 || windKmh >= 55) {
-    return { label: "Storm", tone: "storm", Icon: CloudLightning };
-  }
-  if (trend >= 55) {
-    return { label: "Thunder", tone: "storm", Icon: CloudLightning };
-  }
-  if (trend >= 35) {
-    return { label: "Rain", tone: "rain", Icon: CloudRain };
-  }
-  if (trend >= 18) {
-    return { label: "Partly Cloudy", tone: "cloudy", Icon: CloudSun };
-  }
-  return { label: "Sunny", tone: "clear", Icon: Sun };
+function timeAgo(value: Date | null): string {
+  if (!value) return "waiting for sync";
+  const seconds = Math.round((Date.now() - value.getTime()) / 1000);
+  if (seconds < 60) return `${Math.max(1, seconds)}s ago`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
+  return `${Math.round(seconds / 3600)}h ago`;
 }
 
-function fallbackPoints(): RiskPoint[] {
-  const baseSteps = Array.from({ length: 7 }).map((_, idx) => ({
-    time: `Day ${idx + 1}`,
-    rain_mm: 0,
-    trend: 0
-  }));
-  return [
-    {
-      name: "Dhaka",
-      lat: 23.8103,
-      lon: 90.4125,
-      rainfall_1h_mm: 0,
-      rainfall_6h_mm: 0,
-      rainfall_24h_mm: 0,
-      satellite_precip_mm: 0,
-      river_discharge_m3s: 0,
-      temperature_c: null,
-      wind_kmh: 0,
-      risk_score: 0,
-      risk_level: "low",
-      confidence_pct: 0,
-      satellite_water_anomaly: 0,
-      forecast_steps: baseSteps,
-      has_live_data: false,
-      is_no_data: true,
-      is_true_flood_signal: false
-    }
-  ];
+function weatherVisual(trend: number, windKmh: number): { label: string; tone: string; Icon: typeof Sun } {
+  if (trend >= 80 || windKmh >= 55) return { label: "Storm", tone: "storm", Icon: CloudLightning };
+  if (trend >= 55) return { label: "Thunder", tone: "storm", Icon: CloudLightning };
+  if (trend >= 35) return { label: "Rain", tone: "rain", Icon: CloudRain };
+  if (trend >= 18) return { label: "Cloudy", tone: "cloudy", Icon: CloudSun };
+  return { label: "Clear", tone: "clear", Icon: Sun };
+}
+
+function fallbackPoint(): RiskPoint {
+  const steps = Array.from({ length: 7 }).map((_, idx) => ({ time: `Day ${idx + 1}`, rain_mm: 0, trend: 0 }));
+  return {
+    name: "Dhaka",
+    lat: 23.8103,
+    lon: 90.4125,
+    rainfall_1h_mm: 0,
+    rainfall_6h_mm: 0,
+    rainfall_24h_mm: 0,
+    satellite_precip_mm: 0,
+    river_discharge_m3s: 0,
+    temperature_c: null,
+    wind_kmh: 0,
+    risk_score: 0,
+    risk_level: "low",
+    confidence_pct: 0,
+    satellite_water_anomaly: 0,
+    forecast_steps: steps,
+    has_live_data: false,
+    is_no_data: true,
+    is_true_flood_signal: false
+  };
 }
 
 export default function App() {
@@ -171,200 +167,214 @@ export default function App() {
   const [selected, setSelected] = useState<RiskPoint | null>(null);
   const [densePoints, setDensePoints] = useState<RiskPoint[]>([]);
   const [loading, setLoading] = useState(true);
+  const [booted, setBooted] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [lastSync, setLastSync] = useState<Date | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [aiSummary, setAiSummary] = useState("Select a zone to generate AI explanation.");
-  const [aiMode, setAiMode] = useState<"analysis" | "chat">("analysis");
-  const [chatMessages, setChatMessages] = useState<Array<{ role: "assistant" | "user"; content: string }>>([
-    {
-      role: "assistant",
-      content:
-        "Ask anything you want: math, coding, writing, general knowledge, online-style research summaries, or Flood Spaces project data."
-    }
-  ]);
-  const [chatInput, setChatInput] = useState("");
-  const [chatStatus, setChatStatus] = useState("");
+
   const [countryBoundary, setCountryBoundary] = useState<Record<string, unknown> | null>(null);
   const [districtBoundaries, setDistrictBoundaries] = useState<Record<string, unknown> | null>(null);
   const [upazilaBoundaries, setUpazilaBoundaries] = useState<Record<string, unknown> | null>(null);
   const [locationAccuracyMeters, setLocationAccuracyMeters] = useState<number | null>(null);
+  const [focusPoint, setFocusPoint] = useState<{ lat: number; lon: number; name: string; nonce: number } | null>(null);
 
-  const [chatId, setChatId] = useState("");
-  const [threshold, setThreshold] = useState(70);
-  const [radiusKm, setRadiusKm] = useState(100);
-  const [alertStatus, setAlertStatus] = useState("");
-  const [searchText, setSearchText] = useState("Dhaka, Bangladesh");
+  const [mapMode, setMapMode] = useState<MapMode>("risk");
+  const [searchText, setSearchText] = useState("");
   const [searchStatus, setSearchStatus] = useState("");
   const [searchResults, setSearchResults] = useState<GeocodeResult[]>([]);
+
   const [upstreamStatus, setUpstreamStatus] = useState<UpstreamStatus | null>(null);
-  const [aiProviderStatus, setAiProviderStatus] = useState("");
   const [globalFloodEvents, setGlobalFloodEvents] = useState<GlobalFloodEvent[]>([]);
   const [globalFloodStatus, setGlobalFloodStatus] = useState<"live" | "unavailable" | "unknown">("unknown");
   const [riverWatchPoints, setRiverWatchPoints] = useState<RiskPoint[]>([]);
+  const [botInfo, setBotInfo] = useState<BotInfo | null>(null);
+
+  const [aiMode, setAiMode] = useState<"analysis" | "chat">("analysis");
+  const [aiSummary, setAiSummary] = useState(
+    "Select a hotspot on the map, then generate a briefing. The copilot reads live rainfall, river discharge, satellite anomaly and forecast signals."
+  );
+  const [aiProviderStatus, setAiProviderStatus] = useState("");
+  const [aiBusy, setAiBusy] = useState(false);
+  const [chatMessages, setChatMessages] = useState<Array<{ role: ChatRole; content: string }>>([
+    {
+      role: "assistant",
+      content:
+        "I'm **FloodSpaces AI** — ask me about risk in your area, evacuation planning, weather interpretation, or anything else."
+    }
+  ]);
+  const [chatInput, setChatInput] = useState("");
+  const [chatBusy, setChatBusy] = useState(false);
+  const [chatStreaming, setChatStreaming] = useState(false);
+  const chatAbortRef = useRef<AbortController | null>(null);
+
+  const [chatId, setChatId] = useState(() => {
+    try {
+      return localStorage.getItem("fs.telegramChatId") || "";
+    } catch {
+      return "";
+    }
+  });
+  const [threshold, setThreshold] = useState(55);
+  const [radiusKm, setRadiusKm] = useState(100);
+  const [alertStatus, setAlertStatus] = useState("");
+  const [testingAlert, setTestingAlert] = useState(false);
+  const [showAdvancedAlerts, setShowAdvancedAlerts] = useState(false);
+
+  const chatEndRef = useRef<HTMLDivElement | null>(null);
+  const aiSectionRef = useRef<HTMLElement | null>(null);
+  const mapSectionRef = useRef<HTMLElement | null>(null);
+  const alertsSectionRef = useRef<HTMLElement | null>(null);
 
   const forecastHotspots = useMemo(() => {
-    if (!selected) {
-      return [];
-    }
-    
-    const uniqueAreas = new Map<string, RiskPoint>();
-    
+    const unique = new Map<string, RiskPoint>();
     for (const point of points) {
       const key = point.name.toLowerCase();
-      if (!key.includes("local") && !key.includes("cell") && !uniqueAreas.has(key)) {
-        uniqueAreas.set(key, point);
-      }
+      if (!key.includes("local") && !key.includes("cell") && !unique.has(key)) unique.set(key, point);
     }
-
-    return Array.from(uniqueAreas.values())
-      .map((point) => {
-        return {
-          name: point.name,
-          monthlySignal: Math.round(point.risk_score),
-          monthlyLevel: riskBandFromScore(point.risk_score),
-          peakTime: "N/A"
-        };
-      })
-      .sort((a, b) => b.monthlySignal - a.monthlySignal)
-      .slice(0, 10);
-  }, [points, selected]);
+    return [...unique.values()]
+      .map((point) => ({
+        name: point.name,
+        score: Math.round(point.risk_score),
+        level: riskBandFromScore(point.risk_score)
+      }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 8);
+  }, [points]);
 
   const riverWatchTop = useMemo(() => {
-    const bestByRiver = new Map<string, RiskPoint>();
+    const best = new Map<string, RiskPoint>();
     for (const point of riverWatchPoints) {
-      const key = String(point.river_name || point.name || "Unknown River").trim().toLowerCase();
-      const existing = bestByRiver.get(key);
-      if (!existing || point.risk_score > existing.risk_score) {
-        bestByRiver.set(key, point);
-      }
+      const key = String(point.river_name || point.name || "Unknown").trim().toLowerCase();
+      const existing = best.get(key);
+      if (!existing || point.risk_score > existing.risk_score) best.set(key, point);
     }
-
-    return [...bestByRiver.values()]
-      .sort((a, b) => b.risk_score - a.risk_score)
-      .slice(0, 8);
+    return [...best.values()].sort((a, b) => b.risk_score - a.risk_score).slice(0, 6);
   }, [riverWatchPoints]);
-
-  const riverWatchScale = useMemo(() => {
-    if (!riverWatchTop.length) {
-      return { min: 0, max: 100 };
-    }
-    const scores = riverWatchTop.map((spot) => spot.risk_score);
-    return {
-      min: Math.min(...scores),
-      max: Math.max(...scores)
-    };
-  }, [riverWatchTop]);
 
   const weatherForecast = useMemo(() => {
     const src = selected || points[0];
-    if (!src) {
-      return [];
-    }
-    const steps = src.forecast_steps.slice(0, 7);
-    return steps.map((step, idx) => {
+    if (!src) return [];
+    return src.forecast_steps.slice(0, 7).map((step, idx) => {
+      const wind = typeof step.wind_kmh === "number" ? step.wind_kmh : src.wind_kmh;
       return {
         ...step,
         display_time: forecastIsoFromTodayOffset(idx),
         temp_c: typeof step.temp_c === "number" ? step.temp_c : src.temperature_c,
-        wind_kmh: typeof step.wind_kmh === "number" ? step.wind_kmh : src.wind_kmh,
-        ...weatherVisual(step.trend, typeof step.wind_kmh === "number" ? step.wind_kmh : src.wind_kmh)
+        wind_kmh: wind,
+        ...weatherVisual(step.trend, wind)
       };
     });
   }, [points, selected]);
 
   const forecastTrendData = useMemo(() => {
     const src = selected || points[0];
-    if (!src) {
-      return [];
-    }
-
-    const steps = src.forecast_steps.slice(0, 7);
-
-    return steps.map((step, idx) => {
-      return {
-        label: formatForecastLabel(forecastIsoFromTodayOffset(idx)),
-        risk: Math.round(step.trend)
-      };
-    });
+    if (!src) return [];
+    return src.forecast_steps.slice(0, 7).map((step, idx) => ({
+      label: formatForecastLabel(forecastIsoFromTodayOffset(idx)),
+      risk: Math.round(step.trend)
+    }));
   }, [points, selected]);
 
   const liveFloodTop = useMemo(() => {
-    const severityRank = { emergency: 3, warning: 2, watch: 1 } as const;
+    const rank = { emergency: 3, warning: 2, watch: 1 } as const;
     return [...globalFloodEvents]
-      .sort((a, b) => {
-        const bySeverity = severityRank[b.severity] - severityRank[a.severity];
-        if (bySeverity !== 0) {
-          return bySeverity;
-        }
-        return String(b.observed_at).localeCompare(String(a.observed_at));
-      })
-      .slice(0, 8);
+      .sort((a, b) => rank[b.severity] - rank[a.severity] || String(b.observed_at).localeCompare(String(a.observed_at)))
+      .slice(0, 6);
   }, [globalFloodEvents]);
 
-  const liveFloodLastSeen = useMemo(() => {
-    const parsedTimes = globalFloodEvents
-      .map((event) => Date.parse(event.observed_at))
-      .filter((value) => Number.isFinite(value));
+  const nationalIndex = useMemo(() => {
+    if (!points.length) return 0;
+    const top = [...points].slice(0, 8);
+    return Math.round(top.reduce((sum, point) => sum + point.risk_score, 0) / top.length);
+  }, [points]);
 
-    if (!parsedTimes.length) {
-      return null;
-    }
+  const peakPoint = useMemo(
+    () => [...points].sort((a, b) => b.risk_score - a.risk_score)[0] || null,
+    [points]
+  );
 
-    return new Date(Math.max(...parsedTimes)).toLocaleString(undefined, {
-      month: "short",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit"
-    });
-  }, [globalFloodEvents]);
+  const alertZoneCount = useMemo(() => points.filter((point) => point.risk_score >= 68).length, [points]);
 
-  async function loadGrid() {
+  const liveSourceCount = useMemo(() => {
+    if (!upstreamStatus) return 0;
+    return [
+      upstreamStatus.open_meteo.live || upstreamStatus.openweather_forecast_fallback.live,
+      upstreamStatus.nasa_power.live,
+      upstreamStatus.open_meteo_flood.live,
+      upstreamStatus.ai?.live
+    ].filter(Boolean).length;
+  }, [upstreamStatus]);
+
+  const aiModelLabel = botInfo?.ai_model || "openai/gpt-oss-20b";
+  const telegramUsername = (botInfo?.username || import.meta.env.VITE_TELEGRAM_BOT_USERNAME || "").replace(/^@/, "");
+  const telegramLink = telegramUsername ? `https://t.me/${telegramUsername}` : "";
+
+  useEffect(() => {
     try {
-      setLoading(true);
-      const [data, status, eventData, riverData] = await Promise.all([
-        fetchRiskGrid(),
-        fetchUpstreamStatus().catch(() => null),
-        fetchGlobalFloodEvents().catch(() => null),
-        fetchBdRiverWatch().catch(() => null)
-      ]);
+      localStorage.setItem("fs.telegramChatId", chatId);
+    } catch {
+      /* storage can be blocked in private mode */
+    }
+  }, [chatId]);
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [chatMessages, chatBusy]);
+
+  async function loadGrid(isRefresh = false) {
+    if (isRefresh) setRefreshing(true);
+    setLoading(true);
+
+    try {
+      // Primary payload first: the dashboard lights up as soon as risk data lands.
+      const data = await fetchRiskGrid();
       const ranked = [...data.items].sort((a, b) => b.risk_score - a.risk_score);
       setPoints(ranked);
-      const initial = ranked[0] || null;
       setSelected((prev) => {
-        if (!prev) {
-          return initial;
-        }
-
-        const match = ranked.find(
-          (point) =>
-            point.name.toLowerCase() === prev.name.toLowerCase() ||
-            (Math.abs(point.lat - prev.lat) < 0.03 && Math.abs(point.lon - prev.lon) < 0.03)
+        if (!prev) return ranked[0] || null;
+        return (
+          ranked.find(
+            (point) =>
+              point.name.toLowerCase() === prev.name.toLowerCase() ||
+              (Math.abs(point.lat - prev.lat) < 0.03 && Math.abs(point.lon - prev.lon) < 0.03)
+          ) || prev
         );
-
-        return match || prev;
       });
-      if (status) {
-        setUpstreamStatus(status);
-      }
-      setGlobalFloodEvents(eventData?.items || []);
-      setGlobalFloodStatus(eventData?.status || (eventData?.items?.length ? "live" : "unknown"));
-      setRiverWatchPoints(riverData?.items || []);
-      if (initial) {
-        const local = await fetchAreaGrid(initial.lat, initial.lon, 20, 5);
-        setDensePoints(local);
-      }
+      setLastSync(new Date());
       setError(null);
-      setSearchStatus((prev) => (prev.startsWith("Live API unavailable") ? "" : prev));
+      setLoading(false);
+
+      const focus = ranked[0];
+      if (focus) {
+        fetchAreaGrid(focus.lat, focus.lon, 20, 5)
+          .then((local) => setDensePoints(local.filter((p) => !p.name.includes("Cell"))))
+          .catch(() => setDensePoints([]));
+      }
+
+      // Secondary feeds stream in independently so they never block the map.
+      fetchUpstreamStatus().then(setUpstreamStatus).catch(() => null);
+      fetchGlobalFloodEvents()
+        .then((eventData) => {
+          setGlobalFloodEvents(eventData?.items || []);
+          setGlobalFloodStatus(eventData?.status || (eventData?.items?.length ? "live" : "unknown"));
+        })
+        .catch(() => null);
+      fetchBdRiverWatch()
+        .then((riverData) => setRiverWatchPoints(riverData?.items || []))
+        .catch(() => null);
+      fetchBotInfo().then(setBotInfo).catch(() => null);
     } catch (err) {
-      const fallback = fallbackPoints();
-      setPoints(fallback);
-      setSelected(fallback[0]);
+      const fallback = fallbackPoint();
+      setPoints([fallback]);
+      setSelected((prev) => prev || fallback);
       setDensePoints([]);
       setGlobalFloodEvents([]);
       setGlobalFloodStatus("unknown");
       setRiverWatchPoints([]);
-      setError(null);
+      setError((err as Error).message);
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   }
 
@@ -377,15 +387,15 @@ export default function App() {
       ]);
       setSelected(point);
       setLocationAccuracyMeters(accuracyMeters ?? null);
-      setDensePoints(local.filter((p: RiskPoint) => !p.name.includes("Cell") && !p.name.includes("Local")));
+      setDensePoints(local.filter((p) => !p.name.includes("Cell")));
       setPoints((prev) => {
-        const filtered = prev.filter((p) => 
-          !(Math.abs(p.lat - point.lat) < 0.0001 && Math.abs(p.lon - point.lon) < 0.0001) &&
-          !p.name.includes("Cell") &&
-          !p.name.includes("Local")
+        const filtered = prev.filter(
+          (p) =>
+            !(Math.abs(p.lat - point.lat) < 0.0001 && Math.abs(p.lon - point.lon) < 0.0001) &&
+            !p.name.includes("Cell") &&
+            !p.name.includes("Local")
         );
-        const uniqueNames = new Set(filtered.map(p => p.name.toLowerCase()));
-        if (!uniqueNames.has(point.name.toLowerCase())) {
+        if (!filtered.some((p) => p.name.toLowerCase() === point.name.toLowerCase())) {
           return [point, ...filtered].slice(0, 16);
         }
         return filtered;
@@ -399,10 +409,10 @@ export default function App() {
 
   async function handleUseMyLocation() {
     if (!navigator.geolocation) {
-      setSearchStatus("Geolocation is not supported on this browser.");
+      setSearchStatus("Geolocation is not supported in this browser.");
       return;
     }
-    setSearchStatus("Detecting your location...");
+    setSearchStatus("Detecting your location…");
     navigator.geolocation.getCurrentPosition(
       async (pos) => {
         const accuracy = Number.isFinite(pos.coords.accuracy)
@@ -410,73 +420,58 @@ export default function App() {
           : undefined;
         const point = await handleMapClick(pos.coords.latitude, pos.coords.longitude, undefined, accuracy);
         if (point) {
+          setFocusPoint({ lat: point.lat, lon: point.lon, name: point.name, nonce: Date.now() });
           setSearchText(point.name);
-          setSearchStatus(`📍 ${point.name} (±${Math.round(accuracy || 0)}m accuracy)`);
+          setSearchStatus(`Pinned ${point.name} · ±${Math.round(accuracy || 0)} m`);
           setSearchResults([]);
-          
-          const nearest = points.reduce((prev, curr) => {
-            const prevDist = Math.abs(prev.lat - pos.coords.latitude) + Math.abs(prev.lon - pos.coords.longitude);
-            const currDist = Math.abs(curr.lat - pos.coords.latitude) + Math.abs(curr.lon - pos.coords.longitude);
-            return currDist < prevDist ? curr : prev;
-          }, points[0]);
-          
-          if (nearest) {
-            setSelected(nearest);
-          }
         } else {
-          setSearchStatus("Unable to detect a usable location.");
+          setSearchStatus("Could not resolve a usable location.");
         }
       },
-      () => setSearchStatus("❌ Unable to detect your location. Please enable location services."),
-      {
-        enableHighAccuracy: true,
-        timeout: 15000,
-        maximumAge: 0
-      }
+      () => setSearchStatus("Location permission denied. Enable it in your browser settings."),
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
     );
   }
 
   async function handleSearch() {
-    if (!searchText.trim()) {
-      return;
-    }
+    if (!searchText.trim()) return;
     try {
-      setSearchStatus("🔍 Searching...");
+      setSearchStatus("Searching…");
       const results = await geocodePlace(searchText);
       if (!results.length) {
-        setSearchStatus("❌ No results found. Try different keywords.");
+        setSearchStatus("No matching place. Try a district or upazila name.");
         setSearchResults([]);
         return;
       }
-      if (results.length === 1) {
-        const point = await handleMapClick(results[0].lat, results[0].lon, results[0].name);
-        if (point) {
-          setSearchText(results[0].name);
-          setSearchStatus(`✅ Showing: ${results[0].name}`);
-          setSearchResults([]);
-        }
-        return;
-      }
       setSearchResults(results);
-      setSearchStatus(`📍 Found ${results.length} results - select one:`);
+      setSearchStatus(`${results.length} matches`);
     } catch (err) {
-      setSearchStatus(`❌ ${(err as Error).message}`);
+      setSearchStatus((err as Error).message);
     }
   }
 
   async function handleSearchResultClick(result: GeocodeResult) {
     const point = await handleMapClick(result.lat, result.lon, result.name);
     if (point) {
+      setFocusPoint({ lat: point.lat, lon: point.lon, name: point.name, nonce: Date.now() });
       setSearchText(result.name);
       setSearchResults([]);
-      setSearchStatus(`✅ Showing: ${result.name}`);
+      setSearchStatus(`Showing ${result.name}`);
     }
   }
 
   useEffect(() => {
     loadGrid();
-    const timer = setInterval(loadGrid, 5 * 60 * 1000);
-    return () => clearInterval(timer);
+    const timer = setInterval(() => loadGrid(true), 5 * 60 * 1000);
+    const bootTimer = setTimeout(() => setBooted(true), 2200);
+    return () => {
+      clearInterval(timer);
+      clearTimeout(bootTimer);
+    };
+  }, []);
+
+  useEffect(() => {
+    fetchBotInfo().then(setBotInfo).catch(() => null);
   }, []);
 
   useEffect(() => {
@@ -492,522 +487,877 @@ export default function App() {
         setUpazilaBoundaries(null);
       }
     }
-
     loadBoundaries();
   }, []);
 
+  async function handleAiSummary() {
+    if (!selected || aiBusy) return;
+    setAiMode("analysis");
+    setAiBusy(true);
+    setAiSummary("Analysing rainfall, river discharge, satellite anomaly and the 7-day outlook…");
+    try {
+      const enriched = {
+        ...selected,
+        nearby_areas: forecastHotspots
+          .slice(0, 5)
+          .map((spot) => `${spot.name}: ${spot.score}% risk`)
+          .join(", "),
+        river_watch: riverWatchTop
+          .slice(0, 3)
+          .map((river) => `${river.river_name || river.name}: ${Math.round(river.river_discharge_m3s)} m³/s`)
+          .join(", ")
+      };
+      const summary = await fetchAiSummary(enriched);
+      setAiSummary(summary.summary);
+      setAiProviderStatus(
+        summary.provider_live
+          ? `Groq live · ${summary.provider_model || aiModelLabel}`
+          : `Local fallback · ${summary.provider_reason || "AI unavailable"}`
+      );
+    } catch (err) {
+      setAiSummary((err as Error).message);
+      setAiProviderStatus("AI request failed");
+    } finally {
+      setAiBusy(false);
+    }
+  }
+
+  async function handleTestAlert() {
+    if (testingAlert) return;
+    setTestingAlert(true);
+    setAlertStatus("Sending test alert…");
+    try {
+      const result = await sendTestAlert(chatId);
+      if (result.ok) {
+        setAlertStatus(`Test alert delivered to ${result.sent} chat${result.sent === 1 ? "" : "s"}.`);
+      } else if (result.reason === "no_subscribers") {
+        setAlertStatus("No subscribers yet — press Start in the bot, or add a chat ID below.");
+      } else {
+        setAlertStatus("Test alert could not be delivered. Check the bot token on the backend.");
+      }
+    } catch (err) {
+      setAlertStatus((err as Error).message);
+    } finally {
+      setTestingAlert(false);
+    }
+  }
+
+  async function handleChatSend(override?: string) {
+    const message = (override ?? chatInput).trim();
+    if (!message || chatBusy) return;
+
+    const history = [...chatMessages, { role: "user" as const, content: message }].map(({ role, content }) => ({
+      role,
+      content
+    }));
+    setChatMessages([...chatMessages, { role: "user", content: message }, { role: "assistant", content: "" }]);
+    setChatInput("");
+    setChatBusy(true);
+    setChatStreaming(true);
+
+    const wantsArea = /\b(this area|selected area|current area|this zone|current zone|here|my area)\b/i.test(message);
+    const controller = new AbortController();
+    chatAbortRef.current = controller;
+
+    const writeAssistant = (text: string) => {
+      setChatMessages((prev) => {
+        const next = [...prev];
+        next[next.length - 1] = { role: "assistant", content: text };
+        return next;
+      });
+    };
+
+    try {
+      const reply = await streamAiChat(
+        history,
+        wantsArea ? selected?.name : undefined,
+        (partial) => writeAssistant(partial),
+        controller.signal
+      );
+      if (!reply.trim()) {
+        writeAssistant("⚠️ The model returned an empty response. Please try again.");
+      }
+      setAiProviderStatus(`Groq live · ${aiModelLabel}`);
+    } catch (err) {
+      if (controller.signal.aborted) {
+        setAiProviderStatus("Stopped");
+      } else {
+        try {
+          // Streaming can be blocked by proxies — fall back to the JSON endpoint.
+          const reply = await fetchAiChat(history, wantsArea ? selected?.name : undefined);
+          writeAssistant(reply.reply);
+          setAiProviderStatus(
+            reply.provider_live
+              ? `Groq live · ${reply.provider_model || aiModelLabel}`
+              : `Local fallback · ${reply.provider_reason || "AI unavailable"}`
+          );
+        } catch (fallbackErr) {
+          writeAssistant(`⚠️ ${(fallbackErr as Error).message}`);
+        }
+      }
+    } finally {
+      chatAbortRef.current = null;
+      setChatBusy(false);
+      setChatStreaming(false);
+    }
+  }
+
+  function handleChatStop() {
+    chatAbortRef.current?.abort();
+    setChatBusy(false);
+    setChatStreaming(false);
+  }
+
   async function handleSubscribe() {
-    if (!selected) {
-      setAlertStatus("Pick a location first.");
+    if (!chatId.trim()) {
+      setAlertStatus("Enter your Telegram chat ID, or simply press Start in the bot.");
       return;
     }
     try {
       await subscribeTelegram({
-        chat_id: chatId,
-        lat: selected.lat,
-        lon: selected.lon,
+        chat_id: chatId.trim(),
+        lat: selected?.lat,
+        lon: selected?.lon,
         threshold,
         radius_km: radiusKm
       });
-      const check = await runAlertCheck();
-      setAlertStatus(`Subscribed. Alerts sent now: ${check.alerts_sent}`);
+      setAlertStatus("Alerts enabled. This account is now subscribed automatically.");
     } catch (err) {
       setAlertStatus((err as Error).message);
     }
   }
 
-  async function handleAiSummary() {
-    if (!selected) {
-      return;
-    }
-    setAiSummary("Generating AI flood explanation...");
-    try {
-      const enrichedData = {
-        ...selected,
-        nearby_areas: forecastHotspots.slice(0, 5).map(h => `${h.name}: ${h.monthlySignal}% risk`).join(", "),
-        river_watch: riverWatchTop.slice(0, 3).map(r => `${r.river_name || r.name}: ${Math.round(r.river_discharge_m3s)} m³/s`).join(", ")
-      };
-      const summary = await fetchAiSummary(enrichedData);
-      setAiSummary(summary.summary);
-      if (summary.provider_live) {
-        setAiProviderStatus(`AI provider live (${summary.provider_model || summary.provider || "openrouter"})`);
-      } else {
-        setAiProviderStatus(`AI fallback active (${summary.provider_reason || "openrouter unavailable"})`);
-      }
-    } catch (err) {
-      setAiSummary((err as Error).message);
-      setAiProviderStatus("AI provider check failed.");
-    }
+  function scrollTo(ref: { current: HTMLElement | null }) {
+    ref.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
-  async function handleChatSend() {
-    const message = chatInput.trim();
-    if (!message) {
-      return;
-    }
+  const initialLoading = loading && !points.length;
 
-    const nextMessages = [...chatMessages, { role: "user" as const, content: message }];
-    setChatMessages(nextMessages);
-    setChatInput("");
-    setChatStatus("Thinking...");
-
-    try {
-      const wantsSelectedAreaContext = /\b(this area|selected area|current area|this zone|current zone|here)\b/i.test(message);
-      const reply = await fetchAiChat(nextMessages, wantsSelectedAreaContext ? selected?.name : undefined);
-      setChatMessages((prev) => [...prev, { role: "assistant", content: reply.reply }]);
-      if (reply.provider_live) {
-        setAiProviderStatus(`AI provider live (${reply.provider_model || reply.provider || "openrouter"})`);
-      } else {
-        setAiProviderStatus(`AI fallback active (${reply.provider_reason || "openrouter unavailable"})`);
-      }
-      setChatStatus("");
-    } catch (err) {
-      setChatMessages((prev) => [...prev, { role: "assistant", content: (err as Error).message }]);
-      setChatStatus("AI chat unavailable.");
-      setAiProviderStatus("AI provider check failed.");
-    }
-  }
-
-  if (loading && !points.length) {
+  if (initialLoading && !booted) {
     return <LoadingScreen />;
   }
 
   return (
-    <div className="theme-light app">
-      <header className="topbar compact-topbar">
-        <div className="topbar-brand">
-          <img src="/logo.png" alt="Flood Spaces" className="logo" />
-          <div>
-            <h1>Flood Spaces</h1>
-            <p>Live global flood watch with Bangladesh-focused monthly forecasting</p>
-          </div>
+    <div className="app-shell">
+      <div className="ambient" aria-hidden="true" />
+
+      <aside className="rail">
+        <div className="rail-brand" title="Flood Spaces">
+          <img src="/logo.png" alt="Flood Spaces" />
         </div>
-        <div className="top-actions">
-          <button onClick={loadGrid} className="icon-btn">
-            <RefreshCw size={16} /> Refresh
+        <nav className="rail-nav" aria-label="Sections">
+          <button className="rail-btn is-active" title="Overview" onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}>
+            <Activity size={19} />
           </button>
+          <button className="rail-btn" title="Map" onClick={() => scrollTo(mapSectionRef)}>
+            <MapIcon size={19} />
+          </button>
+          <button className="rail-btn" title="AI copilot" onClick={() => scrollTo(aiSectionRef)}>
+            <Sparkles size={19} />
+          </button>
+          <button className="rail-btn" title="Alerts" onClick={() => scrollTo(alertsSectionRef)}>
+            <Bell size={19} />
+          </button>
+        </nav>
+        <div className="rail-foot">
+          <span className="rail-pulse" title="Live data stream">
+            <Radio size={16} />
+          </span>
         </div>
-      </header>
+      </aside>
 
-      <section className="map-section">
-        <div className="map-wrap">
-          <div className="map-controls">
-            <div className="place-controls">
-              <input
-                className="input"
-                value={searchText}
-                onChange={(e) => setSearchText(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    handleSearch();
-                  }
-                }}
-                placeholder="Search a place in English or Bengali"
-              />
-              <button className="icon-btn" onClick={handleSearch}>
-                <Search size={16} /> Search
-              </button>
-              <button className="icon-btn" onClick={handleUseMyLocation}>
-                <LocateFixed size={16} /> My Location
-              </button>
-            </div>
+      <main className="main">
+        <header className="topbar">
+          <div className="topbar-title">
+            <span className="eyebrow">
+              <span className="eyebrow-dot" /> Bangladesh · live intelligence
+            </span>
+            <h1>Flood command center</h1>
           </div>
-          {searchStatus ? <div className="map-status">{searchStatus}</div> : null}
-          {searchResults.length ? (
-            <div className="search-results">
-              {searchResults.map((result) => (
-                <button
-                  key={`${result.lat}-${result.lon}-${result.name}`}
-                  className="search-result"
-                  onClick={() => handleSearchResultClick(result)}
-                >
-                  <span className="search-main">
-                    <strong>{result.name_en || result.name}</strong>
-                    {result.name_bn && result.name_bn !== result.name ? <small>{result.name_bn}</small> : null}
-                  </span>
-                  <span>{result.source || "search"}</span>
-                </button>
-              ))}
-            </div>
-          ) : null}
-          <div className="map-canvas-wrap">
-            {loading ? <div className="loading">Loading map data...</div> : null}
-            {error ? <div className="error">{error}</div> : null}
-            <MapPanel
-              points={points}
-              densePoints={densePoints}
-              riverWatchPoints={riverWatchPoints}
-              onSelect={setSelected}
-              onMapClick={handleMapClick}
-              selectedName={selected?.name || null}
-              highlightPoint={selected ? { lat: selected.lat, lon: selected.lon, name: selected.name } : null}
-              highlightAccuracyMeters={locationAccuracyMeters}
-              mode="risk"
-              globalFloodEvents={globalFloodEvents}
-              countryBoundary={countryBoundary}
-              districtBoundaries={districtBoundaries}
-              upazilaBoundaries={upazilaBoundaries}
+
+          <div className="search-shell">
+            <Search size={17} className="search-icon" />
+            <input
+              value={searchText}
+              onChange={(event) => setSearchText(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  handleSearch();
+                }
+              }}
+              placeholder="Search district, city or upazila…"
+              aria-label="Search location"
             />
-            <div className="legend">
-              <span className="dot low" /> Normal
-              <span className="dot moderate" /> Moderate
-              <span className="dot high" /> High
-              <span className="dot severe" /> Severe
-              <span className="dot active-flood" /> Active Global Flood
-              <span className="dot river-watch" /> River Watch
-            </div>
+            {searchText ? (
+              <button className="search-clear" onClick={() => setSearchText("")} aria-label="Clear search">
+                <X size={15} />
+              </button>
+            ) : null}
+            <button className="search-submit" onClick={handleSearch} aria-label="Search">
+              <ChevronRight size={16} />
+            </button>
+
+            {searchResults.length ? (
+              <div className="search-results">
+                {searchResults.map((result) => (
+                  <button
+                    key={`${result.lat}-${result.lon}-${result.name}`}
+                    className="search-result"
+                    onClick={() => handleSearchResultClick(result)}
+                  >
+                    <span className="search-main">
+                      <strong>{result.name_en || result.name}</strong>
+                      {result.name_bn && result.name_bn !== result.name ? <small>{result.name_bn}</small> : null}
+                    </span>
+                    <span className="search-source">{result.source || "geo"}</span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
           </div>
-        </div>
-      </section>
 
-      <section className="cards-section">
-        <div className="cards-grid">
-          <div className="card">
-            <h3>
-              <RefreshCw size={16} /> Data Pipeline
-            </h3>
-            {upstreamStatus ? (
-              <>
-                <div className="stats-grid source-health-grid">
-                  <div>
-                    <label>Forecasting Model</label>
-                    <strong>{upstreamStatus.open_meteo.live || upstreamStatus.openweather_forecast_fallback.live ? "LIVE" : "DOWN"}</strong>
-                  </div>
-                  <div>
-                    <label>NASA</label>
-                    <strong>{upstreamStatus.nasa_power.live ? "LIVE" : "DELAYED"}</strong>
-                  </div>
-                  <div>
-                    <label>ML Analysis</label>
-                    <strong>{upstreamStatus.open_meteo_flood.live ? "LIVE" : "DOWN"}</strong>
-                  </div>
-                  <div>
-                    <label>OpenRouter</label>
-                    <strong>{upstreamStatus.openrouter.live ? "LIVE" : "FALLBACK"}</strong>
-                  </div>
-                </div>
-                <p className="hint">Sample check zone: {upstreamStatus.sample_area}</p>
-                <p className="hint">
-                  Active global flood events: {globalFloodEvents.length} ({globalFloodStatus === "live" ? "live" : "feed delayed"})
-                </p>
-              </>
-            ) : (
-              <p className="hint">Source status unavailable. Press refresh.</p>
-            )}
+          <div className="topbar-actions">
+            <button className="ghost-btn locate-btn" onClick={handleUseMyLocation} title="Use my location">
+              <LocateFixed size={16} />
+              <span>My area</span>
+            </button>
+            <div className="live-pill" title={`Last sync ${timeAgo(lastSync)}`}>
+              <span className="live-dot" /> Live · {timeAgo(lastSync)}
             </div>
+            <button className="primary-btn" onClick={() => loadGrid(true)} disabled={refreshing}>
+              <RefreshCw size={16} className={refreshing ? "spin" : ""} />
+              <span>{refreshing ? "Syncing" : "Refresh"}</span>
+            </button>
+          </div>
+        </header>
 
-            <div className="card">
-              <h3>
-                <AlertTriangle size={16} /> Live Global Flood Locations
-              </h3>
-              <p className="hint flood-severity-guide">
-                Severity colors: WATCH = green (early signal), WARNING = orange (active risk), EMERGENCY = red (critical event).
-              </p>
-              <p className="hint">Auto-refresh: every 5 minutes in app. NASA and GDACS sources update continuously or daily by source feed.</p>
-              {liveFloodLastSeen ? <p className="hint">Latest observed event: {liveFloodLastSeen}</p> : null}
-              {liveFloodTop.length ? (
-                <div className="flood-event-list">
-                  {liveFloodTop.map((event) => (
-                    <div key={`${event.id}-${event.lat}-${event.lon}`} className="flood-event-item">
-                      <strong>{event.title}</strong>
-                      <div className="flood-event-meta">
-                        <span>{event.source}</span>
-                        <span className={`flood-severity ${event.severity}`}>{event.severity.toUpperCase()}</span>
-                      </div>
-                      <small>{formatEventTime(event.observed_at)}</small>
-                    </div>
-                  ))}
-                </div>
+        {searchStatus ? (
+          <div className="inline-status">
+            <Compass size={14} /> {searchStatus}
+          </div>
+        ) : null}
+
+        <section className="kpi-row" aria-label="Key indicators">
+          <article className={`kpi-card risk-${riskBandFromScore(nationalIndex)}`}>
+            <div className="kpi-head">
+              <span>National risk index</span>
+              <Gauge size={17} />
+            </div>
+            <div className="kpi-value">
+              {initialLoading ? <span className="value-skeleton" /> : nationalIndex}
+              {initialLoading ? null : <small>/100</small>}
+            </div>
+            <div className="kpi-foot">
+              <span className="chip subtle">{levelText(riskBandFromScore(nationalIndex))}</span>
+              <span>{points.length} zones monitored</span>
+            </div>
+            <div className="kpi-spark">
+              <span style={{ width: `${nationalIndex}%` }} />
+            </div>
+          </article>
+
+          <article className="kpi-card">
+            <div className="kpi-head">
+              <span>Peak hotspot</span>
+              <AlertTriangle size={17} />
+            </div>
+            <div className="kpi-value compact">
+              {initialLoading ? <span className="value-skeleton wide" /> : peakPoint?.name || "—"}
+            </div>
+            <div className="kpi-foot">
+              {peakPoint ? (
+                <>
+                  <span className={`chip risk-chip-${riskBandFromScore(peakPoint.risk_score)}`}>
+                    {Math.round(peakPoint.risk_score)}/100
+                  </span>
+                  <span>rain {peakPoint.rainfall_24h_mm} mm / 24h</span>
+                </>
               ) : (
-                <p className="hint">No live global flood event in feed right now.</p>
+                <span>Awaiting data</span>
               )}
             </div>
+          </article>
 
-            <div className="card">
-            <h3>
-              <Clock3 size={16} /> 1 Month Bangladesh Outlook
-            </h3>
-            {!selected ? (
-              <p className="hint">Select an area from the map first.</p>
-            ) : forecastHotspots.length ? (
-              <div className="forecast-timeline">
-                {forecastHotspots.map((spot) => (
-                  <div key={spot.name} className="forecast-step">
-                    <div className="step-time">{spot.name}</div>
-                    <div className="step-bar">
-                      <div className="step-fill" style={{ width: `${spot.monthlySignal}%` }} />
-                    </div>
-                    <div className="step-rain">{spot.monthlySignal}%</div>
-                    <div className={`step-level ${spot.monthlyLevel}`}>
-                      {riskLabel(spot.monthlyLevel)}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="hint">No forecast hotspots yet.</p>
-            )}
+          <article className="kpi-card">
+            <div className="kpi-head">
+              <span>Active alert zones</span>
+              <Bell size={17} />
             </div>
-
-            <div className="card">
-            <h3>
-              <CloudRain size={16} /> Bangladesh River Watch (Discharge in m³/s)
-            </h3>
-            <p className="hint">m³/s = cubic meters per second (water flow volume). Higher = more flood risk.</p>
-            {!selected ? (
-              <p className="hint">Select an area from the map first.</p>
-            ) : riverWatchTop.length ? (
-              <div className="forecast-timeline river-watch-list">
-                {riverWatchTop.map((spot) => (
-                  <div key={`${spot.name}-${spot.lat}-${spot.lon}`} className="forecast-step">
-                    <div className="step-time">
-                      {spot.river_name || "River"}
-                      <small>{spot.name}</small>
-                    </div>
-                    <div className="step-bar">
-                      <div
-                        className="step-fill"
-                        style={{
-                          width: `${Math.max(0, Math.min(100, spot.risk_score))}%`
-                        }}
-                      />
-                    </div>
-                    <div className="step-rain">{Math.round(spot.river_discharge_m3s)} m³/s</div>
-                    <div className={`step-level ${riskBandFromScore(spot.risk_score)}`}>{riskLabel(riskBandFromScore(spot.risk_score))}</div>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="hint">River watch data is loading or temporarily unavailable.</p>
-            )}
+            <div className="kpi-value">
+              {initialLoading ? <span className="value-skeleton" /> : alertZoneCount}
+              {initialLoading ? null : <small>high+</small>}
             </div>
-
-            <div className="card span-2">
-            <h3>
-              <AlertTriangle size={16} /> Selected Zone
-            </h3>
-            {!selected ? (
-              <p className="hint">Select an area from the map first.</p>
-            ) : (
-              <>
-                <p className="zone-name">{selected.name}</p>
-                <p className={levelClass(selected.risk_level)}>
-                  {riskLabel(selected.risk_level)} - {selected.risk_score}/100
-                </p>
-                <p className="hint">Confidence: {selected.confidence_pct}%</p>
-                <div className="stats-grid">
-                  <div>
-                    <label>Rain 1h</label>
-                    <strong>{selected.rainfall_1h_mm} mm</strong>
-                  </div>
-                  <div>
-                    <label>Rain 24h</label>
-                    <strong>{selected.rainfall_24h_mm} mm</strong>
-                  </div>
-                  <div>
-                    <label>Wind</label>
-                    <strong>{selected.wind_kmh > 0 ? `${selected.wind_kmh} km/h` : "n/a"}</strong>
-                  </div>
-                  <div>
-                    <label>NASA Precip</label>
-                    <strong>{selected.satellite_precip_mm} mm</strong>
-                  </div>
-                  <div>
-                    <label>River Discharge</label>
-                    <strong>{selected.river_discharge_m3s} m3/s</strong>
-                  </div>
-                  <div>
-                    <label>Temperature</label>
-                    <strong>{selected.temperature_c !== null && selected.temperature_c !== undefined ? `${selected.temperature_c}°C` : "n/a"}</strong>
-                  </div>
-                  <div>
-                    <label>Satellite Anomaly</label>
-                    <strong>{Math.round(selected.satellite_water_anomaly * 100)}%</strong>
-                  </div>
-                  <div>
-                    <label>Signal</label>
-                    <strong>{selected.is_true_flood_signal ? "Flood Dot" : "Watch"}</strong>
-                  </div>
-                </div>
-                {selected.data_sources ? (
-                  <p className="hint">
-                    Sources: Forecast={selected.data_sources.forecast_source} | NASA={selected.data_sources.nasa_live ? "live" : "delayed"} | River={selected.data_sources.river_live ? "live" : "down"}
-                  </p>
-                ) : null}
-              </>
-            )}
+            <div className="kpi-foot">
+              <span className="chip subtle">threshold 68</span>
+              <span>{globalFloodEvents.length} global events</span>
             </div>
+          </article>
 
-            <div className="card">
-            <h3>
-              <Bell size={16} /> Telegram Alert
-            </h3>
-            <input
-              className="input"
-              placeholder="Telegram Chat ID"
-              value={chatId}
-              onChange={(e) => setChatId(e.target.value)}
-            />
-            <label>Risk Threshold: {threshold}</label>
-            <input type="range" min={30} max={95} value={threshold} onChange={(e) => setThreshold(Number(e.target.value))} />
-            <label>Radius (km): {radiusKm}</label>
-            <input type="range" min={20} max={200} value={radiusKm} onChange={(e) => setRadiusKm(Number(e.target.value))} />
-            <button className="primary" onClick={handleSubscribe}>
-              Activate Alerts
+          <article className="kpi-card">
+            <div className="kpi-head">
+              <span>Data pipeline</span>
+              <Layers3 size={17} />
+            </div>
+            <div className="kpi-value">
+              {initialLoading ? <span className="value-skeleton" /> : liveSourceCount}
+              {initialLoading ? null : <small>/4 live</small>}
+            </div>
+            <div className="kpi-foot">
+              <span className={`chip ${liveSourceCount >= 3 ? "ok" : "warn"}`}>
+                {liveSourceCount >= 3 ? "Nominal" : "Degraded"}
+              </span>
+              <span>Open-Meteo · NASA · river · Groq</span>
+            </div>
+          </article>
+
+          <article className="kpi-card accent">
+            <div className="kpi-head">
+              <span>Auto-alert subscribers</span>
+              <ShieldCheck size={17} />
+            </div>
+            <div className="kpi-value">
+              {initialLoading ? <span className="value-skeleton" /> : botInfo?.subscribers ?? 0}
+              {initialLoading ? null : <small>chat ids</small>}
+            </div>
+            <div className="kpi-foot">
+              <span className={`chip ${botInfo?.configured ? "ok" : "warn"}`}>
+                {botInfo?.configured ? "Bot online" : "Bot key missing"}
+              </span>
+              <span>{botInfo?.webhook_mode ? "webhook" : "polling"} mode</span>
+            </div>
+          </article>
+        </section>
+
+        {error ? (
+          <div className="banner error-banner">
+            <AlertTriangle size={16} />
+            <span>Live backend unreachable. Showing cached shell — {error}</span>
+            <button className="ghost-btn" onClick={() => loadGrid(true)}>
+              Retry
             </button>
-            {alertStatus ? <p className="hint">{alertStatus}</p> : null}
+          </div>
+        ) : null}
+
+        {!error && !initialLoading && upstreamStatus && !upstreamStatus.core_data_live ? (
+          <div className="banner warn-banner">
+            <Radio size={16} />
+            <span>
+              Upstream feeds are degraded right now. Risk cells are shown without live rainfall/river input and will refresh
+              automatically every 5 minutes.
+            </span>
+            <button className="ghost-btn" onClick={() => loadGrid(true)}>
+              Retry feeds
+            </button>
+          </div>
+        ) : null}
+
+        <section className="workspace" ref={mapSectionRef}>
+          <div className="panel map-card">
+            <div className="panel-head">
+              <div>
+                <span className="panel-eyebrow">Geospatial intelligence</span>
+                <h2>Risk surface · Bangladesh</h2>
+              </div>
+              <div className="map-toolbar">
+                <div className="segmented" role="tablist" aria-label="Map metric">
+                  {(["risk", "rain", "wind"] as MapMode[]).map((mode) => (
+                    <button
+                      key={mode}
+                      className={mapMode === mode ? "is-active" : ""}
+                      onClick={() => setMapMode(mode)}
+                      role="tab"
+                      aria-selected={mapMode === mode}
+                    >
+                      {mode === "risk" ? "Risk" : mode === "rain" ? "Rain" : "Wind"}
+                    </button>
+                  ))}
+                </div>
+                <button className="ghost-btn compact" onClick={handleUseMyLocation} title="Jump to my location">
+                  <LocateFixed size={15} />
+                </button>
+              </div>
             </div>
 
-            <div className="card span-2 ai-card">
-            <h3>
-              <Bot size={16} /> AI Risk Brief
-            </h3>
-            {aiProviderStatus ? <p className="hint">{aiProviderStatus}</p> : null}
-            <div className="ai-mode-switch">
-              <button className={aiMode === "analysis" ? "active" : ""} onClick={() => setAiMode("analysis")}>
-                📊 Area Analysis
+            <div className="map-canvas-wrap">
+              {loading && !points.length ? (
+                <div className="map-loading">
+                  <div className="spinner" /> Loading risk surface…
+                </div>
+              ) : null}
+              <MapPanel
+                points={points}
+                densePoints={densePoints}
+                riverWatchPoints={riverWatchPoints}
+                onSelect={setSelected}
+                onMapClick={handleMapClick}
+                selectedName={selected?.name || null}
+                highlightPoint={selected ? { lat: selected.lat, lon: selected.lon, name: selected.name } : null}
+                focusPoint={focusPoint}
+                highlightAccuracyMeters={locationAccuracyMeters}
+                mode={mapMode}
+                globalFloodEvents={globalFloodEvents}
+                countryBoundary={countryBoundary}
+                districtBoundaries={districtBoundaries}
+                upazilaBoundaries={upazilaBoundaries}
+              />
+              {mapMode === "risk" ? (
+                <div className="map-legend">
+                  <span><i className="dot low" /> Normal</span>
+                  <span><i className="dot moderate" /> Moderate</span>
+                  <span><i className="dot high" /> High</span>
+                  <span><i className="dot severe" /> Severe</span>
+                  <span><i className="dot active-flood" /> Active flood</span>
+                  <span><i className="dot river-watch" /> River watch</span>
+                </div>
+              ) : (
+                <div className="map-legend">
+                  <span>{mapMode === "rain" ? "24h rain" : "Wind"}</span>
+                  <span className="gradient-legend" aria-hidden="true" />
+                  <span>{mapMode === "rain" ? "0 mm → 120+ mm" : "0 → 80+ km/h"}</span>
+                </div>
+              )}
+              <div className="map-hint">Click anywhere to inspect a location · scroll to zoom</div>
+            </div>
+          </div>
+
+          <div className="side-col">
+            <section className="panel selected-card">
+              <div className="panel-head tight">
+                <div>
+                  <span className="panel-eyebrow">Selected zone</span>
+                  <h2>{selected?.name || "No zone selected"}</h2>
+                </div>
+                {selected ? (
+                  <span className={`level-badge level-${selected.risk_level}`}>{levelText(selected.risk_level)}</span>
+                ) : null}
+              </div>
+
+              {selected ? (
+                <>
+                  <div className="gauge-wrap">
+                    <RiskGauge score={selected.risk_score} level={selected.risk_level} />
+                    <div className="gauge-side">
+                      <div className="mini-stat">
+                        <span>Confidence</span>
+                        <strong>{selected.confidence_pct}%</strong>
+                      </div>
+                      <div className="mini-stat">
+                        <span>NASA anomaly</span>
+                        <strong>{Math.round(selected.satellite_water_anomaly * 100)}%</strong>
+                      </div>
+                      <div className="mini-stat">
+                        <span>Temperature</span>
+                        <strong>
+                          {selected.temperature_c !== null && selected.temperature_c !== undefined
+                            ? `${selected.temperature_c}°C`
+                            : "n/a"}
+                        </strong>
+                      </div>
+                      <div className="mini-stat">
+                        <span>Signal</span>
+                        <strong>{selected.is_true_flood_signal ? "Flood" : selected.is_no_data ? "No data" : "Watch"}</strong>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="metric-grid">
+                    <div><span>Rain 1h</span><strong>{selected.rainfall_1h_mm} mm</strong></div>
+                    <div><span>Rain 24h</span><strong>{selected.rainfall_24h_mm} mm</strong></div>
+                    <div><span>Wind</span><strong>{selected.wind_kmh} km/h</strong></div>
+                    <div><span>River flow</span><strong>{Math.round(selected.river_discharge_m3s)} m³/s</strong></div>
+                    <div><span>NASA precip</span><strong>{selected.satellite_precip_mm} mm</strong></div>
+                    <div><span>Coordinates</span><strong>{selected.lat.toFixed(2)}, {selected.lon.toFixed(2)}</strong></div>
+                  </div>
+
+                  <div className="selected-actions">
+                    <button className="primary-btn full" onClick={handleAiSummary} disabled={aiBusy}>
+                      <Sparkles size={16} />
+                      {aiBusy ? "Generating briefing…" : "Generate AI briefing"}
+                    </button>
+                  </div>
+
+                  {selected.data_sources ? (
+                    <p className="source-line">
+                      forecast {selected.data_sources.forecast_source} · NASA {selected.data_sources.nasa_live ? "live" : "delayed"} ·
+                      river {selected.data_sources.river_live ? "live" : "unavailable"}
+                    </p>
+                  ) : null}
+                </>
+              ) : (
+                <p className="empty-note">
+                  {initialLoading ? "Loading the live risk surface…" : "Tap any marker or the map to load a zone briefing."}
+                </p>
+              )}
+            </section>
+
+            <section className="panel telegram-card" ref={alertsSectionRef}>
+              <div className="panel-head tight">
+                <div>
+                  <span className="panel-eyebrow">Automatic alerts</span>
+                  <h2>Telegram flood bot</h2>
+                </div>
+                <span className={`status-dot ${botInfo?.configured ? "online" : "offline"}`} />
+              </div>
+
+              <p className="muted-copy">
+                Anyone who opens the bot and presses <strong>Start</strong> is subscribed instantly — every high-risk alert is
+                delivered automatically, no dashboard needed.
+              </p>
+
+              <div className="telegram-stats">
+                <div><span>Subscribers</span><strong>{botInfo?.subscribers ?? 0}</strong></div>
+                <div><span>Delivery</span><strong>{botInfo?.webhook_mode ? "Webhook" : "Auto-poll"}</strong></div>
+              </div>
+
+              {telegramLink ? (
+                <a className="primary-btn full" href={telegramLink} target="_blank" rel="noreferrer">
+                  <Send size={16} /> Open @{telegramUsername}
+                  <ArrowUpRight size={14} />
+                </a>
+              ) : (
+                <div className="banner small warn-banner">
+                  <AlertTriangle size={15} /> Set <code>TELEGRAM_BOT_TOKEN</code> on the backend to activate the bot.
+                </div>
+              )}
+
+              <div className="telegram-actions">
+                <button className="ghost-btn" onClick={handleTestAlert} disabled={testingAlert}>
+                  <Zap size={15} /> {testingAlert ? "Sending…" : "Send test alert"}
+                </button>
+                {botInfo?.configured ? (
+                  <span className="source-line inline">Bot token detected</span>
+                ) : (
+                  <span className="source-line inline">Bot token missing</span>
+                )}
+              </div>
+
+              <button className="link-btn" onClick={() => setShowAdvancedAlerts((prev) => !prev)}>
+                {showAdvancedAlerts ? "Hide manual linking" : "Link a chat ID manually"}
+                <ChevronRight size={14} className={showAdvancedAlerts ? "rotated" : ""} />
               </button>
-              <button className={aiMode === "chat" ? "active" : ""} onClick={() => setAiMode("chat")}>
-                💬 General Chat
+
+              {showAdvancedAlerts ? (
+                <div className="advanced-alerts">
+                  <label>
+                    Telegram chat ID
+                    <input
+                      className="input"
+                      placeholder="e.g. 123456789"
+                      value={chatId}
+                      onChange={(event) => setChatId(event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    Risk threshold · {threshold}
+                    <input
+                      type="range"
+                      min={25}
+                      max={95}
+                      value={threshold}
+                      onChange={(event) => setThreshold(Number(event.target.value))}
+                    />
+                  </label>
+                  <label>
+                    Radius · {radiusKm} km
+                    <input
+                      type="range"
+                      min={20}
+                      max={300}
+                      step={10}
+                      value={radiusKm}
+                      onChange={(event) => setRadiusKm(Number(event.target.value))}
+                    />
+                  </label>
+                  <button className="primary-btn full" onClick={handleSubscribe}>
+                    <Bell size={15} /> Enable alerts for {selected?.name || "my area"}
+                  </button>
+                </div>
+              ) : null}
+
+              {alertStatus ? <p className="source-line">{alertStatus}</p> : null}
+            </section>
+          </div>
+        </section>
+
+        <section className="split-grid" ref={aiSectionRef}>
+          <div className="panel ai-panel">
+            <div className="panel-head">
+              <div>
+                <span className="panel-eyebrow">Copilot</span>
+                <h2>FloodSpaces AI</h2>
+              </div>
+              <div className="ai-meta">
+                <span className="ai-chip"><Zap size={13} /> Groq</span>
+                <span className="ai-model">{aiModelLabel}</span>
+              </div>
+            </div>
+
+            <div className="ai-tabs">
+              <button className={aiMode === "analysis" ? "is-active" : ""} onClick={() => setAiMode("analysis")}>
+                <Gauge size={15} /> Area briefing
+              </button>
+              <button className={aiMode === "chat" ? "is-active" : ""} onClick={() => setAiMode("chat")}>
+                <MessageSquare size={15} /> Chat
               </button>
             </div>
+
             {aiMode === "analysis" ? (
-              <div className="ai-analysis-panel">
-                <div className="ai-response markdown-render">
+              <div className="ai-analysis">
+                <div className={`ai-brief markdown-render ${aiBusy ? "is-busy" : ""}`}>
                   <ReactMarkdown remarkPlugins={[remarkGfm]}>{aiSummary}</ReactMarkdown>
                 </div>
-                <div className="ai-actions">
-                  <button className="primary" onClick={handleAiSummary}>
-                    Generate AI Summary
+                <div className="ai-analysis-foot">
+                  <span className="source-line">{aiProviderStatus || "Groq-backed briefing engine"}</span>
+                  <button className="primary-btn" onClick={handleAiSummary} disabled={aiBusy || !selected}>
+                    <Sparkles size={16} /> {aiBusy ? "Thinking…" : "Generate briefing"}
                   </button>
                 </div>
               </div>
             ) : (
-              <>
-                <div className="chat-container">
+              <div className="chat-shell">
+                <div className="chat-stream">
                   {chatMessages.map((message, index) => (
-                    <div key={`${message.role}-${index}`} className={message.role === "user" ? "chat-message user" : "chat-message assistant"}>
-                      <div className="chat-content markdown-render">
+                    <div key={`${message.role}-${index}`} className={`bubble ${message.role}`}>
+                      <div className="bubble-avatar">{message.role === "user" ? "You" : <Bot size={15} />}</div>
+                      <div className="bubble-content markdown-render">
                         <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
                       </div>
                     </div>
                   ))}
+                  {chatBusy && !chatStreaming ? (
+                    <div className="bubble assistant">
+                      <div className="bubble-avatar"><Bot size={15} /></div>
+                      <div className="typing"><span /><span /><span /></div>
+                    </div>
+                  ) : null}
+                  <div ref={chatEndRef} />
                 </div>
-                <div className="chat-input-area">
+
+                <div className="quick-prompts">
+                  {quickPrompts.map((prompt) => (
+                    <button key={prompt} onClick={() => handleChatSend(prompt)} disabled={chatBusy}>
+                      {prompt}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="composer">
                   <textarea
-                    className="input chat-input"
-                    rows={3}
-                    placeholder="Ask anything: general topics, math, coding, online-style summaries, or project data"
+                    rows={1}
+                    placeholder="Ask about risk, safety, weather, or anything else…"
                     value={chatInput}
-                    onChange={(e) => setChatInput(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && !e.shiftKey) {
-                        e.preventDefault();
+                    onChange={(event) => setChatInput(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && !event.shiftKey) {
+                        event.preventDefault();
                         handleChatSend();
                       }
                     }}
                   />
-                  <button className="primary" onClick={handleChatSend}>
-                    Send
-                  </button>
+                  {chatBusy ? (
+                    <button className="primary-btn stop" onClick={handleChatStop} title="Stop generating">
+                      <X size={16} />
+                    </button>
+                  ) : (
+                    <button className="primary-btn" onClick={() => handleChatSend()} disabled={!chatInput.trim()}>
+                      <Send size={16} />
+                    </button>
+                  )}
                 </div>
-                {chatStatus ? <p className="hint">{chatStatus}</p> : null}
-              </>
+                <span className="source-line">{aiProviderStatus || "Powered by Groq · openai/gpt-oss-20b"}</span>
+              </div>
             )}
+          </div>
+
+          <div className="panel events-panel">
+            <div className="panel-head">
+              <div>
+                <span className="panel-eyebrow">Global feed</span>
+                <h2>Live flood events</h2>
+              </div>
+              <span className={`chip ${globalFloodStatus === "live" ? "ok" : "warn"}`}>
+                {globalFloodStatus === "live" ? "Live" : "Feed delayed"}
+              </span>
             </div>
+            <p className="muted-copy">NASA EONET + GDACS, refreshed continuously.</p>
 
+            <div className="event-list">
+              {liveFloodTop.length ? (
+                liveFloodTop.map((event) => (
+                  <article key={`${event.id}-${event.lat}-${event.lon}`} className="event-item">
+                    <span className={`severity-bar ${event.severity}`} />
+                    <div className="event-body">
+                      <strong>{event.title}</strong>
+                      <div className="event-meta">
+                        <span>{event.source}</span>
+                        <time>{formatEventTime(event.observed_at)}</time>
+                      </div>
+                    </div>
+                    <span className={`severity-chip ${event.severity}`}>{event.severity}</span>
+                  </article>
+                ))
+              ) : (
+                <p className="empty-note">No live flood events in the current feed.</p>
+              )}
+            </div>
+          </div>
+        </section>
 
-        </div>
-      </section>
+        <section className="tri-grid">
+          <div className="panel">
+            <div className="panel-head">
+              <div>
+                <span className="panel-eyebrow">Forecast</span>
+                <h2>1-month outlook</h2>
+              </div>
+              <Clock3 size={17} className="panel-icon" />
+            </div>
+            <div className="outlook-list">
+              {forecastHotspots.map((spot) => (
+                <div key={spot.name} className="outlook-row">
+                  <span className="outlook-name">{spot.name}</span>
+                  <div className="bar-track">
+                    <div className={`bar-fill tone-${spot.level}`} style={{ width: `${spot.score}%` }} />
+                  </div>
+                  <span className="outlook-score">{spot.score}%</span>
+                </div>
+              ))}
+              {!forecastHotspots.length ? <p className="empty-note">Outlook arrives with the next forecast cycle.</p> : null}
+            </div>
+          </div>
 
-      <section className="bottom-strip">
-        <div className="bottom-main">
-          <div className="card chart-card">
-            <h3>7 Day Risk Trend Analysis (Selected Area)</h3>
-            {selected ? (
-              <>
-                <p className="hint">{selected.name} - Risk Score: {selected.risk_score}/100</p>
-                <p className="chart-formula">Risk = f(Rain₁ₕ×6 + Rain₆ₕ×1.8 + Rain₂₄ₕ×0.7 + Wind×0.8 + NASA×0.9 + River×0.03)</p>
-              </>
-            ) : null}
+          <div className="panel">
+            <div className="panel-head">
+              <div>
+                <span className="panel-eyebrow">Hydrology</span>
+                <h2>River watch</h2>
+              </div>
+              <Waves size={17} className="panel-icon" />
+            </div>
+            <div className="river-list">
+              {riverWatchTop.map((river) => (
+                <div key={`${river.name}-${river.lat}`} className="river-row">
+                  <div className="river-name">
+                    <strong>{river.river_name || "River"}</strong>
+                    <span>{river.name}</span>
+                  </div>
+                  <div className="river-values">
+                    <strong>{Math.round(river.river_discharge_m3s)} <small>m³/s</small></strong>
+                    <span className={`chip risk-chip-${riskBandFromScore(river.risk_score)}`}>
+                      {levelText(riskBandFromScore(river.risk_score))}
+                    </span>
+                  </div>
+                </div>
+              ))}
+              {!riverWatchTop.length ? <p className="empty-note">River gauges are loading.</p> : null}
+            </div>
+          </div>
+
+          <div className="panel">
+            <div className="panel-head">
+              <div>
+                <span className="panel-eyebrow">Weather</span>
+                <h2>7-day outlook</h2>
+              </div>
+              <CloudSun size={17} className="panel-icon" />
+            </div>
+            <div className="weather-strip">
+              {weatherForecast.map((item, idx) => (
+                <div key={`${item.time}-${idx}`} className={`weather-cell tone-${item.tone}`}>
+                  <span>{formatForecastLabel(item.display_time)}</span>
+                  <item.Icon size={20} />
+                  <strong>{item.label}</strong>
+                  <small>{Math.round(item.rain_mm)} mm</small>
+                </div>
+              ))}
+              {!weatherForecast.length ? <p className="empty-note">Weather forecast unavailable.</p> : null}
+            </div>
+          </div>
+        </section>
+
+        <section className="bottom-grid">
+          <div className="panel chart-panel">
+            <div className="panel-head">
+              <div>
+                <span className="panel-eyebrow">Trend</span>
+                <h2>7-day risk trajectory</h2>
+              </div>
+              {selected ? <span className="chip subtle">{selected.name}</span> : null}
+            </div>
             <div className="chart-wrap">
               <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={forecastTrendData} margin={{ top: 14, right: 16, bottom: 4, left: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(15, 23, 42, 0.2)" />
-                  <XAxis dataKey="label" tick={{ fontSize: 11 }} interval={0} />
-                  <YAxis tick={{ fontSize: 11 }} domain={[0, 100]} label={{ value: 'Risk %', angle: -90, position: 'insideLeft' }} />
+                <AreaChart data={forecastTrendData} margin={{ top: 12, right: 12, left: -18, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="riskArea" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="#22d3ee" stopOpacity={0.55} />
+                      <stop offset="100%" stopColor="#22d3ee" stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="4 6" stroke="rgba(148, 163, 184, 0.14)" vertical={false} />
+                  <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#7c8aa0" }} axisLine={false} tickLine={false} />
+                  <YAxis domain={[0, 100]} tick={{ fontSize: 11, fill: "#7c8aa0" }} axisLine={false} tickLine={false} />
                   <Tooltip
+                    contentStyle={{
+                      background: "rgba(9, 16, 28, 0.94)",
+                      border: "1px solid rgba(148, 163, 184, 0.25)",
+                      borderRadius: 12,
+                      color: "#e6edf7",
+                      fontSize: 12
+                    }}
+                    labelStyle={{ color: "#94a3b8" }}
                     formatter={(value: number) => [`${value}%`, "Risk trend"]}
-                    labelFormatter={(label) => `Day: ${label}`}
                   />
-                  <Line
-                    type="monotone"
-                    dataKey="risk"
-                    stroke="#dc2626"
-                    strokeWidth={3}
-                    dot={{ r: 3.5, fill: "#dc2626" }}
-                    activeDot={{ r: 5 }}
-                  />
-                </LineChart>
+                  <Area type="monotone" dataKey="risk" stroke="#22d3ee" strokeWidth={2.6} fill="url(#riskArea)" />
+                </AreaChart>
               </ResponsiveContainer>
             </div>
+            <p className="source-line">Blended rainfall, wind, NASA precipitation and river discharge signals.</p>
           </div>
 
-          <div className="card weather-card">
-            <h3>
-              <CloudSun size={16} /> 7 Day Weather & Rain Forecast (Selected Area)
-            </h3>
-            {selected ? <p className="hint">{selected.name}</p> : null}
-            {weatherForecast.length ? (
-              <div className="weather-grid">
-                {weatherForecast.map((item, idx) => (
-                  <div key={`${item.time}-${idx}`} className={`weather-item ${item.tone}`}>
-                    <div className="weather-day">{formatForecastLabel(item.display_time)}</div>
-                    <item.Icon size={18} className="weather-icon" />
-                    <div className="weather-label">{item.label}</div>
-                    <div className="weather-meta">
-                      <div>{typeof item.temp_c === "number" ? `${Math.round(item.temp_c)} C` : "Temp n/a"}</div>
-                      <div>{typeof item.wind_kmh === "number" ? `${Math.round(item.wind_kmh)} km/h` : "Wind n/a"}</div>
-                      <div>{Math.round(item.rain_mm)} mm rain</div>
-                    </div>
-                  </div>
-                ))}
+          <div className="panel emergency-panel">
+            <div className="panel-head">
+              <div>
+                <span className="panel-eyebrow">Emergency</span>
+                <h2>Bangladesh helplines</h2>
               </div>
-            ) : (
-              <p className="hint">Weather forecast currently unavailable.</p>
-            )}
-          </div>
-        </div>
-
-        <div className="card emergency-card">
-          <h3>🚨 Bangladesh Emergency Contacts</h3>
-          <div className="emergency-grid">
-            {bdEmergencyContacts.map((c) => (
-              <a key={c.name} href={c.link} className="emergency-item">
-                <div className="emergency-name">{c.name}</div>
-                <div className="emergency-value">{c.value}</div>
-              </a>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      <footer className="footer">
-        <div className="footer-content">
-          <div className="footer-team">
-            <div className="team-member">
-              <strong>Developer:</strong> <a href="https://redoyanulhaque.me" target="_blank" rel="noopener noreferrer">Redoyanul Haque</a>
+              <Phone size={17} className="panel-icon" />
             </div>
-            <div className="team-member">
-              <strong>Teammate:</strong> Debmalya Dutta Teertha
+            <div className="emergency-grid">
+              {bdEmergencyContacts.map((contact) => (
+                <a key={contact.name} href={contact.link} className="emergency-item">
+                  <span>{contact.name}</span>
+                  <strong>{contact.value}</strong>
+                </a>
+              ))}
             </div>
           </div>
-          <div className="footer-note">
-            Educational flood forecasting assistant - Not an official disaster warning system
+        </section>
+
+        <footer className="footer">
+          <div className="footer-brand">
+            <img src="/logo.png" alt="" />
+            <div>
+              <strong>Flood Spaces 2.0</strong>
+              <span>Real-time flood intelligence for Bangladesh</span>
+            </div>
           </div>
-        </div>
-      </footer>
+
+          <div className="footer-meta">
+            <span><Droplets size={14} /> Built by Redoyanul Haque · Debmalya Dutta Teertha</span>
+            <span><Wind size={14} /> Open-Meteo · NASA · GDACS · Groq</span>
+            <span><ShieldCheck size={14} /> Educational forecasting — not an official warning authority</span>
+          </div>
+
+          <div className="footer-links">
+            <a href="https://redoyanulhaque.me" target="_blank" rel="noreferrer">
+              Developer <ExternalLink size={13} />
+            </a>
+            <span className="footer-sep" />
+            <span className="footer-model"><Bot size={14} /> gpt-oss-20b</span>
+          </div>
+        </footer>
+      </main>
     </div>
   );
 }

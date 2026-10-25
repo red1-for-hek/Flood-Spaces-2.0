@@ -5,8 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview"
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "smoke": "esbuild smoke/render.smoke.tsx --bundle --platform=node --format=cjs --target=node20 --outfile=node_modules/.cache/smoke.cjs --external:jsdom --alias:maplibre-gl=./smoke/maplibre-stub.ts --loader:.css=empty --log-level=error --define:import.meta.env='{\"DEV\":true,\"PROD\":false,\"MODE\":\"development\",\"VITE_API_BASE_URL\":\"\",\"VITE_TELEGRAM_BOT_USERNAME\":\"\",\"VITE_MAP_TILES\":\"\"}' && node node_modules/.cache/smoke.cjs"
   },
   "dependencies": {
     "clsx": "^2.1.1",
@@ -22,6 +24,7 @@
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.4.1",
+    "jsdom": "^26.0.0",
     "typescript": "^5.7.2",
     "vite": "^6.0.3"
   }

@@ -227,7 +227,7 @@ async function main() {
         ] as Array<[string, boolean]>)
       : []),
     ["shell rendered", html.includes("app-shell")],
-    ["title", html.includes("Flood command center")],
+    ["title", html.includes("Flood Spaces</h1>")],
     ["KPI strip", html.includes("National risk index")],
     ["peak hotspot name", html.includes("Sylhet")],
     ["risk gauge", html.includes("risk-gauge-value")],
@@ -239,8 +239,21 @@ async function main() {
     ["events feed", html.includes("Flood in Sylhet Division")],
     ["emergency helplines", html.includes("16163")],
     ["no degraded banner", !html.includes("Upstream feeds are degraded")],
-    ["no error banner", !html.includes("Live backend unreachable")]
+    ["no error banner", !html.includes("Live backend unreachable")],
+    ["no CARTO key watermark text", !/API KEY REQUIRED|basemaps\/apikey/i.test(html)]
   ];
+
+  if (!noWebgl) {
+    const style = (globalThis as Record<string, unknown>).__maplibreLastStyle as
+      | { sources?: Record<string, { tiles?: string[] }> }
+      | undefined;
+    const tiles = style?.sources?.basemap?.tiles || [];
+    checks.push(
+      ["basemap needs no API key", !tiles.some((url) => /cartocdn\.com/i.test(url))],
+      ["keyless dark basemap configured", tiles.some((url) => /arcgisonline\.com/i.test(url))],
+      ["basemap label layer present", Boolean(style?.sources?.["basemap-labels"])]
+    );
+  }
 
   let failed = 0;
   for (const [label, ok] of checks) {

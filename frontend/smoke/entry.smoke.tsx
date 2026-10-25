@@ -112,7 +112,7 @@ async function main() {
   const checks: Array<[string, boolean]> = [
     ["root has content", (win.document.getElementById("root")?.innerHTML.length ?? 0) > 2000],
     ["intro cleared", !html.includes("loading-screen")],
-    ["dashboard rendered", html.includes("Flood command center")],
+    ["dashboard rendered", html.includes("Flood Spaces</h1>")],
     ["severe zone shown", html.includes("Sunamganj")],
     ["boundary not triggered", !html.includes("hit an unexpected error")],
     ["crash overlay not shown", !html.includes("flood-spaces-crash-overlay")]

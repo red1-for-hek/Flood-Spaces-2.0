@@ -10,6 +10,30 @@
 
 **Vercel cannot host this backend for 24/7 alerts.** Serverless functions are killed after each request, so the APScheduler job that sweeps risk every 5 minutes never runs, and the JSON subscriber store is wiped. Keep Vercel for the frontend and move the API to a long-running host.
 
+### Environment variables at a glance
+
+**Backend — Render (or Railway / Fly), secrets, never on Vercel:**
+
+```env
+GROQ_API_KEY=gsk_...                    # AI chat (gpt-oss-20b)
+TELEGRAM_BOT_TOKEN=123456:AA...         # from @BotFather
+TELEGRAM_BOT_USERNAME=YourFloodBot      # used by the dashboard deep link
+FRONTEND_ORIGIN=https://floodspaces.vercel.app
+GROQ_MODEL=openai/gpt-oss-20b           # default, optional
+GROQ_REASONING_EFFORT=low               # fastest replies, optional
+TELEGRAM_STATE_PATH=/opt/render/project/src/backend/data/telegram_store.json
+```
+
+**Frontend — Vercel, Project Settings → Environment Variables:**
+
+```env
+VITE_API_BASE_URL=https://<your-service>.onrender.com
+VITE_TELEGRAM_BOT_USERNAME=YourFloodBot
+# optional: VITE_CARTO_KEY=<free carto key>
+```
+
+`VITE_*` values are compiled into the bundle — **redeploy after editing them**.
+
 
 ---
 
@@ -140,14 +164,21 @@ Mount a volume at `/app/data` so subscribers survive restarts.
 ## 3) Deploy the frontend (Vercel)
 
 1. **Vercel → Add New Project → Import repo**
-2. Root directory: `frontend`
+2. Root directory: `frontend` ← this matters; the repo root has no frontend app
 3. Framework preset: **Vite** (auto-detected; `frontend/vercel.json` also sets it)
-4. Environment variable:
+4. Environment variables (Settings → Environment Variables → Production **and** Preview):
 
-```
-VITE_API_BASE_URL=https://<your-service>.onrender.com
-VITE_TELEGRAM_BOT_USERNAME=YourFloodBot
-```
+| Name | Value | Required |
+| --- | --- | --- |
+| `VITE_API_BASE_URL` | `https://<your-service>.onrender.com` (no trailing slash) | ✅ |
+| `VITE_TELEGRAM_BOT_USERNAME` | `YourFloodBot` | optional |
+| `VITE_CARTO_KEY` | free key from <https://carto.com/basemaps/apikey> | optional |
+| `VITE_MAP_TILES` | any raster template, e.g. OSM | optional |
+
+> `VITE_*` variables are **build-time**. After adding or changing one you must redeploy
+> (Deployments → ⋯ → Redeploy) — saving the variable alone changes nothing.
+>
+> Do **not** put `GROQ_API_KEY` or `TELEGRAM_BOT_TOKEN` in Vercel: they belong to the backend only.
 
 5. Deploy, then add the Vercel URL to the backend's `FRONTEND_ORIGIN` and redeploy the backend.
 
@@ -215,15 +246,29 @@ If `live` is `false`, read `reason`: `missing_groq_api_key`, `http_401`, `http_4
 
 ---
 
-## 6) Map keys
+## 6) Map basemap keys (why you saw “API KEY REQUIRED”)
 
-No map key is required. The dashboard uses CARTO dark raster tiles and falls back to OpenStreetMap automatically. If you prefer another free provider:
+CARTO added a key requirement to its public raster CDN on **25 September 2026**. Keyless requests
+still return **HTTP 200**, but the PNG is stamped *“API KEY REQUIRED · carto.com/basemaps/apikey”*.
+Because it is a 200, MapLibre raises no error, so no automatic fallback can fire.
 
-```
+The app is built for this:
+
+- **Default (no env vars):** keyless dark basemap — Esri World Dark Gray + label layer, with an
+  automatic switch to OpenStreetMap if Esri is unreachable. **No key needed.**
+- **Optional CARTO look:** request the free key (5M tiles/month, no account) at
+  <https://carto.com/basemaps/apikey> and set `VITE_CARTO_KEY=…` on Vercel, then redeploy.
+- **Fully custom:** `VITE_MAP_TILES=https://…/{z}/{x}/{y}.png`, comma-separate multiple templates.
+
+A CARTO URL configured **without** a key is detected and skipped, so the watermark cannot return.
+
+```env
+# optional — OSM only
 VITE_MAP_TILES=https://tile.openstreetmap.org/{z}/{x}/{y}.png
-```
 
-Do not use MapTiler/Mapbox styles that require a key — those are what produced the “API key required” map error.
+# optional — CARTO Dark Matter with a free key
+VITE_CARTO_KEY=your_key
+```
 
 ---
 

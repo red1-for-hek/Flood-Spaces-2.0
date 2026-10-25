@@ -68,7 +68,7 @@ async function main() {
   const checks: Array<[string, boolean]> = [
     ["left the intro screen", !html.includes("loading-screen")],
     ["shell mounted", html.includes("app-shell")],
-    ["header rendered", html.includes("Flood command center")],
+    ["header rendered", html.includes("Flood Spaces</h1>")],
     ["KPI row rendered", html.includes("National risk index")],
     ["map card rendered", html.includes("Risk surface")],
     ["selected zone card", html.includes("Selected zone")],

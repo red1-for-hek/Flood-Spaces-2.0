@@ -104,7 +104,7 @@ async function main() {
   await new Promise((resolve) => setTimeout(resolve, 3200));
 
   const before = win.document.body.innerHTML;
-  if (!before.includes("Flood command center")) {
+  if (!before.includes("Flood Spaces</h1>")) {
     console.log("FAIL  dashboard did not render before the error");
     process.exit(1);
   }
@@ -125,7 +125,7 @@ async function main() {
   const toasts = win.document.querySelectorAll("#flood-spaces-toast [data-message]");
 
   const checks: Array<[string, boolean]> = [
-    ["dashboard still rendered", html.includes("Flood command center")],
+    ["dashboard still rendered", html.includes("Flood Spaces</h1>")],
     ["toast shown", toasts.length === 1],
     ["toast names the error", (toasts[0]?.getAttribute("data-message") || "").includes("M_ID")],
     ["duplicate toast suppressed", toasts.length < 2],

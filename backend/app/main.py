@@ -20,6 +20,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from requests_cache import CachedSession
 from retry_requests import retry
@@ -865,6 +866,121 @@ async def groq_chat_completion(
         "provider_model": None,
         "provider_reason": last_error,
     }
+
+
+async def stream_groq_chat(
+    messages: List[Dict[str, str]],
+    temperature: float = 0.6,
+    max_tokens: int = 420,
+    profile: Literal["fast", "balanced"] = "fast",
+):
+    """Yield reply text incrementally from Groq's streaming completions."""
+    key = os.getenv("GROQ_API_KEY", "").strip()
+    if not key:
+        yield local_ai_fallback(messages)
+        return
+
+    endpoint = (
+        os.getenv("GROQ_API_BASE", "").strip()
+        or "https://api.groq.com/openai/v1/chat/completions"
+    )
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    model = groq_model_candidates(profile)[0]
+    is_reasoning_model = "gpt-oss" in model.lower()
+    payload: Dict = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.6 if is_reasoning_model else temperature,
+        "stream": True,
+    }
+    if is_reasoning_model:
+        payload["reasoning_effort"] = os.getenv("GROQ_REASONING_EFFORT", "low").strip() or "low"
+        payload["max_completion_tokens"] = max(320, int(max_tokens))
+    else:
+        payload["max_tokens"] = max_tokens
+
+    emitted = False
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            async with client.stream("POST", endpoint, headers=headers, json=payload) as response:
+                if response.status_code >= 400:
+                    logger.info("Groq stream failed with %s", response.status_code)
+                else:
+                    async for line in response.aiter_lines():
+                        if not line or not line.startswith("data:"):
+                            continue
+                        chunk = line[5:].strip()
+                        if chunk == "[DONE]":
+                            break
+                        try:
+                            parsed = json.loads(chunk)
+                        except Exception:
+                            continue
+                        choices = parsed.get("choices") or []
+                        if not choices:
+                            continue
+                        delta = (choices[0].get("delta") or {}).get("content")
+                        if delta:
+                            emitted = True
+                            yield delta
+    except Exception as exc:
+        logger.info("Groq stream error: %s", safe_error_message(exc))
+
+    if not emitted:
+        fallback = await groq_chat_completion(
+            messages, temperature=temperature, max_tokens=max_tokens, profile=profile
+        )
+        yield str(fallback.get("text", "")).strip() or local_ai_fallback(messages)
+
+
+def build_chat_system_prompt(last_user_message: str, area_name: str | None, web_context: str) -> str:
+    project_keywords = (
+        "flood",
+        "risk",
+        "river",
+        "rain",
+        "weather",
+        "bangladesh",
+        "map",
+        "nasa",
+        "gdacs",
+        "alert",
+        "telegram",
+        "forecast",
+        "pipeline",
+        "dashboard",
+        "project",
+    )
+    wants_selected_area = bool(
+        re.search(r"\b(this area|selected area|current area|this zone|here)\b", last_user_message)
+    )
+    project_mode = any(keyword in last_user_message for keyword in project_keywords) or wants_selected_area
+
+    if project_mode:
+        prompt = (
+            "You are a helpful assistant for Flood Spaces and flood-risk guidance. "
+            "For flood/project questions, provide practical, actionable answers. "
+            "Return Markdown with short headings or bullets when useful. "
+            "Keep default responses concise (1-4 short lines) unless the user asks for detail. "
+            "Do not output LaTeX."
+        )
+        if area_name:
+            prompt += f" Current selected area: {area_name}."
+    else:
+        prompt = (
+            "You are a fast, general-purpose AI assistant. "
+            "You can answer any topic including math, coding, writing, planning, and general knowledge. "
+            "If asked for live web facts, be transparent about uncertainty and provide best guidance. "
+            "Return clear Markdown (lists, bold highlights) when useful. "
+            "If the user sends only a greeting, reply in one short friendly line and ask what they need. "
+            "Do not output long capability lists unless asked. "
+            "Keep default responses concise (1-4 short lines) unless the user asks for depth. "
+            "Do not output LaTeX unless the user explicitly asks for math notation."
+        )
+
+    if web_context:
+        prompt += f" Web snapshot (may be partial): {web_context}."
+    return prompt
 
 
 async def fetch_openweather_forecast_payload(lat: float, lon: float) -> Dict | None:
@@ -3329,52 +3445,8 @@ async def ai_chat(body: AIChatRequest) -> Dict:
             "provider_reason": "greeting_fast_path",
         }
 
-    project_keywords = (
-        "flood",
-        "risk",
-        "river",
-        "rain",
-        "weather",
-        "bangladesh",
-        "map",
-        "nasa",
-        "gdacs",
-        "alert",
-        "telegram",
-        "forecast",
-        "pipeline",
-        "dashboard",
-        "project",
-    )
-    wants_selected_area = bool(re.search(r"\b(this area|selected area|current area|this zone|here)\b", last_user_message))
-    project_mode = any(keyword in last_user_message for keyword in project_keywords) or wants_selected_area
     web_context = await fetch_web_context(last_user_message) if wants_web_context(last_user_message) else ""
-
-    if project_mode:
-        system_prompt = (
-            "You are a helpful assistant for Flood Spaces and flood-risk guidance. "
-            "For flood/project questions, provide practical, actionable answers. "
-            "Return Markdown with short headings or bullets when useful. "
-            "Keep default responses concise (1-4 short lines) unless the user asks for detail. "
-            "Do not output LaTeX."
-        )
-        if body.area_name:
-            system_prompt += f" Current selected area: {body.area_name}."
-        if web_context:
-            system_prompt += f" Web snapshot (may be partial): {web_context}."
-    else:
-        system_prompt = (
-            "You are a fast, general-purpose AI assistant. "
-            "You can answer any topic including math, coding, writing, planning, and general knowledge. "
-            "If asked for live web facts, be transparent about uncertainty and provide best guidance. "
-            "Return clear Markdown (lists, bold highlights) when useful. "
-            "If the user sends only a greeting, reply in one short friendly line and ask what they need. "
-            "Do not output long capability lists unless asked. "
-            "Keep default responses concise (1-4 short lines) unless the user asks for depth. "
-            "Do not output LaTeX unless the user explicitly asks for math notation."
-        )
-        if web_context:
-            system_prompt += f" Web snapshot (may be partial): {web_context}."
+    system_prompt = build_chat_system_prompt(last_user_message, body.area_name, web_context)
 
     reply = await groq_chat_completion(
         [{"role": "system", "content": system_prompt}, *user_messages],
@@ -3389,3 +3461,34 @@ async def ai_chat(body: AIChatRequest) -> Dict:
         "provider_model": reply.get("provider_model"),
         "provider_reason": reply.get("provider_reason"),
     }
+
+
+@app.post("/api/ai/chat/stream")
+async def ai_chat_stream(body: AIChatRequest) -> StreamingResponse:
+    user_messages = [message.model_dump() for message in body.messages if message.content.strip()]
+    if not user_messages:
+        raise HTTPException(status_code=400, detail="Chat message required")
+
+    last_user_message = ""
+    for message in reversed(user_messages):
+        if message.get("role") == "user":
+            last_user_message = str(message.get("content", "")).strip().lower()
+            break
+
+    web_context = await fetch_web_context(last_user_message) if wants_web_context(last_user_message) else ""
+    system_prompt = build_chat_system_prompt(last_user_message, body.area_name, web_context)
+    payload = [{"role": "system", "content": system_prompt}, *user_messages]
+
+    async def generator():
+        async for chunk in stream_groq_chat(payload, temperature=0.2, max_tokens=320, profile="fast"):
+            yield chunk
+
+    return StreamingResponse(
+        generator(),
+        media_type="text/plain; charset=utf-8",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )

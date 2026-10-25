@@ -110,6 +110,45 @@ export async function fetchAiSummary(point: RiskPoint): Promise<AISummaryRespons
   });
 }
 
+export function apiUrl(path: string): string {
+  // Streaming needs a direct URL (fetch + ReadableStream), not the JSON retry loop.
+  const configured = splitConfiguredBases(import.meta.env.VITE_API_BASE_URL || "");
+  const base = configured.length ? normalizeBase(configured[0]) : browserOrigin ? "" : "http://127.0.0.1:8004";
+  return `${base}${path}`;
+}
+
+export async function streamAiChat(
+  messages: AIChatMessage[],
+  areaName: string | undefined,
+  onChunk: (text: string) => void,
+  signal?: AbortSignal
+): Promise<string> {
+  const response = await fetch(apiUrl("/api/ai/chat/stream"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages, area_name: areaName ?? null }),
+    signal
+  });
+
+  if (!response.ok || !response.body) {
+    throw new Error(`Streaming unavailable (HTTP ${response.status})`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    text += decoder.decode(value, { stream: true });
+    onChunk(text);
+  }
+  text += decoder.decode();
+  onChunk(text);
+  return text;
+}
+
 export async function fetchAiChat(messages: AIChatMessage[], areaName?: string): Promise<AIChatResponse> {
   return requestJson<AIChatResponse>("/api/ai/chat", {
     method: "POST",

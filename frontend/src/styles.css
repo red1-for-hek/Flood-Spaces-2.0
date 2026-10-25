@@ -2414,3 +2414,22 @@ input[type="range"]::-moz-range-thumb {
   background: linear-gradient(90deg, rgb(46, 194, 126), rgb(254, 138, 46));
   box-shadow: 0 0 0 1px rgba(148, 163, 184, 0.2) inset;
 }
+
+.composer .primary-btn.stop {
+  background: linear-gradient(140deg, #fca5a5, #f87171);
+  color: #190707;
+}
+
+.bubble.assistant .bubble-content:empty::after {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 14px;
+  border-radius: 2px;
+  background: var(--accent);
+  animation: caretBlink 1s steps(2, start) infinite;
+}
+
+@keyframes caretBlink {
+  50% { opacity: 0; }
+}

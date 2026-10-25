@@ -14,7 +14,7 @@
 | Area | Highlights |
 | --- | --- |
 | 🗺️ **Risk map** | Dark CARTO basemap (no API key), risk hexes, district/upazila overlays, river-watch pins, live global flood events, click-anywhere inspection |
-| 🧠 **AI copilot** | Groq `openai/gpt-oss-20b` for area briefings and general chat (math, coding, safety plans, anything) |
+| 🧠 **AI copilot** | Groq `openai/gpt-oss-20b`, token-streamed chat with stop button, plus area briefings |
 | 🚨 **Automatic Telegram alerts** | Anyone who presses **Start** is subscribed instantly — alerts are pushed with no dashboard open |
 | 📊 **Command center UI** | KPI strip, risk gauge, confidence, 1-month outlook, river discharge, 7-day trend + weather |
 | 🛰️ **Data pipeline** | Open-Meteo forecast & flood API, NASA POWER precipitation, NASA EONET + GDACS events, OpenWeather fallback |
@@ -170,6 +170,7 @@ Full walkthrough: [DEPLOYMENT.md](DEPLOYMENT.md).
 | `GET` | `/api/global-flood-events` | NASA EONET + GDACS |
 | `POST` | `/api/ai/summary` | Groq area briefing |
 | `POST` | `/api/ai/chat` | Groq general chat |
+| `POST` | `/api/ai/chat/stream` | Token-streamed Groq chat (used by the dashboard) |
 | `POST` | `/api/alerts/subscribe` | Link a Telegram chat manually |
 | `POST` | `/api/alerts/test` | Send a one-off test alert (optional `?chat_id=`) |
 | `GET` | `/api/cron/alerts` | Cron-friendly alert sweep |
@@ -178,6 +179,15 @@ Full walkthrough: [DEPLOYMENT.md](DEPLOYMENT.md).
 | `POST` | `/api/telegram/setup-webhook` | Register the webhook |
 
 ---
+
+## 🧪 Tests
+
+```bash
+cd frontend
+npm run typecheck   # strict TS
+npm run build       # production bundle
+npm run smoke       # jsdom render test: mounts the whole app with mocked APIs
+```
 
 ## 🧪 Model philosophy
 

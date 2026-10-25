@@ -58,6 +58,7 @@ import {
   fetchUpstreamStatus,
   geocodePlace,
   sendTestAlert,
+  streamAiChat,
   subscribeTelegram
 } from "./lib/api";
 import type { BotInfo, GeocodeResult, GlobalFloodEvent, RiskPoint, UpstreamStatus } from "./types";
@@ -203,6 +204,8 @@ export default function App() {
   ]);
   const [chatInput, setChatInput] = useState("");
   const [chatBusy, setChatBusy] = useState(false);
+  const [chatStreaming, setChatStreaming] = useState(false);
+  const chatAbortRef = useRef<AbortController | null>(null);
 
   const [chatId, setChatId] = useState(() => {
     try {
@@ -519,34 +522,6 @@ export default function App() {
     }
   }
 
-  async function handleChatSend(override?: string) {
-    const message = (override ?? chatInput).trim();
-    if (!message || chatBusy) return;
-
-    const nextMessages = [...chatMessages, { role: "user" as const, content: message }];
-    setChatMessages(nextMessages);
-    setChatInput("");
-    setChatBusy(true);
-
-    try {
-      const wantsArea = /\b(this area|selected area|current area|this zone|current zone|here|my area)\b/i.test(message);
-      const reply = await fetchAiChat(
-        nextMessages.map(({ role, content }) => ({ role, content })),
-        wantsArea ? selected?.name : undefined
-      );
-      setChatMessages((prev) => [...prev, { role: "assistant", content: reply.reply }]);
-      setAiProviderStatus(
-        reply.provider_live
-          ? `Groq live · ${reply.provider_model || aiModelLabel}`
-          : `Local fallback · ${reply.provider_reason || "AI unavailable"}`
-      );
-    } catch (err) {
-      setChatMessages((prev) => [...prev, { role: "assistant", content: `⚠️ ${(err as Error).message}` }]);
-    } finally {
-      setChatBusy(false);
-    }
-  }
-
   async function handleTestAlert() {
     if (testingAlert) return;
     setTestingAlert(true);
@@ -565,6 +540,72 @@ export default function App() {
     } finally {
       setTestingAlert(false);
     }
+  }
+
+  async function handleChatSend(override?: string) {
+    const message = (override ?? chatInput).trim();
+    if (!message || chatBusy) return;
+
+    const history = [...chatMessages, { role: "user" as const, content: message }].map(({ role, content }) => ({
+      role,
+      content
+    }));
+    setChatMessages([...chatMessages, { role: "user", content: message }, { role: "assistant", content: "" }]);
+    setChatInput("");
+    setChatBusy(true);
+    setChatStreaming(true);
+
+    const wantsArea = /\b(this area|selected area|current area|this zone|current zone|here|my area)\b/i.test(message);
+    const controller = new AbortController();
+    chatAbortRef.current = controller;
+
+    const writeAssistant = (text: string) => {
+      setChatMessages((prev) => {
+        const next = [...prev];
+        next[next.length - 1] = { role: "assistant", content: text };
+        return next;
+      });
+    };
+
+    try {
+      const reply = await streamAiChat(
+        history,
+        wantsArea ? selected?.name : undefined,
+        (partial) => writeAssistant(partial),
+        controller.signal
+      );
+      if (!reply.trim()) {
+        writeAssistant("⚠️ The model returned an empty response. Please try again.");
+      }
+      setAiProviderStatus(`Groq live · ${aiModelLabel}`);
+    } catch (err) {
+      if (controller.signal.aborted) {
+        setAiProviderStatus("Stopped");
+      } else {
+        try {
+          // Streaming can be blocked by proxies — fall back to the JSON endpoint.
+          const reply = await fetchAiChat(history, wantsArea ? selected?.name : undefined);
+          writeAssistant(reply.reply);
+          setAiProviderStatus(
+            reply.provider_live
+              ? `Groq live · ${reply.provider_model || aiModelLabel}`
+              : `Local fallback · ${reply.provider_reason || "AI unavailable"}`
+          );
+        } catch (fallbackErr) {
+          writeAssistant(`⚠️ ${(fallbackErr as Error).message}`);
+        }
+      }
+    } finally {
+      chatAbortRef.current = null;
+      setChatBusy(false);
+      setChatStreaming(false);
+    }
+  }
+
+  function handleChatStop() {
+    chatAbortRef.current?.abort();
+    setChatBusy(false);
+    setChatStreaming(false);
   }
 
   async function handleSubscribe() {
@@ -1084,7 +1125,7 @@ export default function App() {
                       </div>
                     </div>
                   ))}
-                  {chatBusy ? (
+                  {chatBusy && !chatStreaming ? (
                     <div className="bubble assistant">
                       <div className="bubble-avatar"><Bot size={15} /></div>
                       <div className="typing"><span /><span /><span /></div>
@@ -1114,9 +1155,15 @@ export default function App() {
                       }
                     }}
                   />
-                  <button className="primary-btn" onClick={() => handleChatSend()} disabled={chatBusy || !chatInput.trim()}>
-                    <Send size={16} />
-                  </button>
+                  {chatBusy ? (
+                    <button className="primary-btn stop" onClick={handleChatStop} title="Stop generating">
+                      <X size={16} />
+                    </button>
+                  ) : (
+                    <button className="primary-btn" onClick={() => handleChatSend()} disabled={!chatInput.trim()}>
+                      <Send size={16} />
+                    </button>
+                  )}
                 </div>
                 <span className="source-line">{aiProviderStatus || "Powered by Groq · openai/gpt-oss-20b"}</span>
               </div>

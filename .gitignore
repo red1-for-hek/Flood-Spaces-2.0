@@ -17,3 +17,6 @@ __pycache__/
 # OS/editor
 .DS_Store
 .vscode/
+
+# Local smoke scratch files
+frontend/smoke/_*

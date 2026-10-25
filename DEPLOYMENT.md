@@ -55,6 +55,9 @@ https://<your-service>.onrender.com/api/telegram/bot-info
 
 `bot-info` should return `"configured": true` and the resolved `username`.
 
+> Run a **single** uvicorn worker (the default). Multiple workers would each poll Telegram
+> and duplicate alerts. If you scale out, switch to webhook mode and move state to a shared store.
+
 ### Why Starter, not Free?
 
 Render's free web services sleep after ~15 minutes of inactivity. When asleep:

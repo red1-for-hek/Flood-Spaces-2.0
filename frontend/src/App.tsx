@@ -766,6 +766,19 @@ export default function App() {
           </div>
         ) : null}
 
+        {!error && !initialLoading && upstreamStatus && !upstreamStatus.core_data_live ? (
+          <div className="banner warn-banner">
+            <Radio size={16} />
+            <span>
+              Upstream feeds are degraded right now. Risk cells are shown without live rainfall/river input and will refresh
+              automatically every 5 minutes.
+            </span>
+            <button className="ghost-btn" onClick={() => loadGrid(true)}>
+              Retry feeds
+            </button>
+          </div>
+        ) : null}
+
         <section className="workspace" ref={mapSectionRef}>
           <div className="panel map-card">
             <div className="panel-head">

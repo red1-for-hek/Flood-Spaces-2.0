@@ -139,6 +139,21 @@ https://<your-service>.onrender.com/api/telegram/bot-info
 > Run a **single** uvicorn worker (the default). Multiple workers would each poll Telegram
 > and duplicate alerts. If you scale out, switch to webhook mode and move state to a shared store.
 
+### Free forever?
+
+| Option | Cost | 24/7 alerts? | Subscribers survive restarts? |
+| --- | --- | --- | --- |
+| **Vercel serverless** | free | ❌ scheduler dies after each request | ❌ `/tmp` only |
+| **Render Free + 5-min pinger** | free | ⚠️ only while pings keep it awake (UptimeRobot / cron-job.org) | ❌ no disk on free |
+| **Render Starter + 1 GB disk** | ~$7/mo | ✅ | ✅ |
+| **Oracle Cloud Always Free VM** | free | ✅ (self-managed docker) | ✅ (volume) |
+
+For a free build: choose Render **Free**, delete the `disk:` block from `render.yaml`, set
+`TELEGRAM_STATE_PATH` to the default (inside the app folder), and add a free UptimeRobot monitor
+hitting `https://<your-service>.onrender.com/api/health` every 5 minutes. Alerts keep flowing while
+the instance stays awake; subscribers are re-created only if Render restarts the instance — the bot
+replies to `/start` so anyone can re-subscribe in one tap.
+
 ### Why Starter, not Free?
 
 Render's free web services sleep after ~15 minutes of inactivity. When asleep:
@@ -173,6 +188,7 @@ Mount a volume at `/app/data` so subscribers survive restarts.
 | `VITE_API_BASE_URL` | `https://<your-service>.onrender.com` (no trailing slash) | ✅ |
 | `VITE_TELEGRAM_BOT_USERNAME` | `YourFloodBot` | optional |
 | `VITE_CARTO_KEY` | free key from <https://carto.com/basemaps/apikey> | optional |
+| `VITE_MAP_THEME` | `light` (default) or `dark` | optional |
 | `VITE_MAP_TILES` | any raster template, e.g. OSM | optional |
 
 > `VITE_*` variables are **build-time**. After adding or changing one you must redeploy
@@ -254,8 +270,9 @@ Because it is a 200, MapLibre raises no error, so no automatic fallback can fire
 
 The app is built for this:
 
-- **Default (no env vars):** keyless dark basemap — Esri World Dark Gray + label layer, with an
-  automatic switch to OpenStreetMap if Esri is unreachable. **No key needed.**
+- **Default (no env vars):** keyless **light** basemap — Esri World Light Gray + label layer, with an
+  automatic switch to OpenStreetMap if Esri is unreachable. **No key needed.** Prefer the dark canvas?
+  Set `VITE_MAP_THEME=dark`.
 - **Optional CARTO look:** request the free key (5M tiles/month, no account) at
   <https://carto.com/basemaps/apikey> and set `VITE_CARTO_KEY=…` on Vercel, then redeploy.
 - **Fully custom:** `VITE_MAP_TILES=https://…/{z}/{x}/{y}.png`, comma-separate multiple templates.

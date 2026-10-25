@@ -841,7 +841,7 @@ a {
   border-radius: 16px;
   overflow: hidden;
   border: 1px solid rgba(148, 163, 184, 0.13);
-  background: #060c15;
+  background: #0b1220;
 }
 
 .map-shell,
@@ -909,6 +909,47 @@ a {
 .maplibregl-popup-tip {
   border-top-color: rgba(9, 16, 28, 0.97) !important;
   border-bottom-color: rgba(9, 16, 28, 0.97) !important;
+}
+
+.map-mode-chip {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  z-index: 6;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  background: rgba(7, 13, 23, 0.78);
+  backdrop-filter: blur(12px);
+  color: #dbe6f4;
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+  font-weight: 600;
+  pointer-events: none;
+  transition: border-color 200ms ease, background 200ms ease;
+}
+
+.map-mode-chip .map-mode-swatch {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 3px rgba(148, 163, 184, 0.18);
+  transition: background 200ms ease, box-shadow 200ms ease;
+}
+
+.map-mode-chip.mode-risk .map-mode-swatch {
+  background: linear-gradient(135deg, #34d399 0%, #fbbf24 45%, #ef4444 100%);
+}
+
+.map-mode-chip.mode-rain .map-mode-swatch {
+  background: linear-gradient(135deg, #67e8f9 0%, #0ea5e9 55%, #4338ca 100%);
+}
+
+.map-mode-chip.mode-wind .map-mode-swatch {
+  background: linear-gradient(135deg, #c4b5fd 0%, #a78bfa 55%, #6d28d9 100%);
 }
 
 .map-legend {

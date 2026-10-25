@@ -13,7 +13,7 @@
 
 | Area | Highlights |
 | --- | --- |
-| 🗺️ **Risk map** | Dark CARTO basemap (no API key), risk hexes, district/upazila overlays, river-watch pins, live global flood events, click-anywhere inspection |
+| 🗺️ **Risk map** | Keyless basemap, **country-wide hex grid (Flood Hub style)**, risk/rain/wind layers, district/upazila overlays, river-watch pins, live global flood events, click-anywhere inspection, **"Your location" marker** with GPS accuracy radius |
 | 🧠 **AI copilot** | Groq `openai/gpt-oss-20b`, token-streamed chat with stop button, plus area briefings |
 | 🚨 **Automatic Telegram alerts** | Anyone who presses **Start** is subscribed instantly — alerts are pushed with no dashboard open |
 | 📊 **Dashboard UI** | KPI strip, risk gauge, confidence, 1-month outlook, river discharge, 7-day trend + weather |
@@ -89,11 +89,14 @@ Open **http://localhost:5173** (the dev server proxies `/api` to `http://127.0.0
 | `VITE_API_BASE_URL` | Yes (prod) | Backend URL, e.g. `https://flood-spaces-api.onrender.com` |
 | `VITE_TELEGRAM_BOT_USERNAME` | Optional | Bot username for the “Open bot” button |
 | `VITE_MAP_TILES` | Optional | Custom raster tile template(s), comma-separated — keyless providers work out of the box |
-| `VITE_CARTO_KEY` | Optional | Free CARTO basemap key — switches the dark basemap to CARTO Dark Matter |
+| `VITE_CARTO_KEY` | Optional | Free CARTO basemap key — switches the basemap to CARTO Dark Matter |
+| `VITE_MAP_THEME` | Optional | `light` (default) or `dark` for the keyless Esri canvas |
 
 ---
 
 ## 🤖 Telegram bot — automatic alerts for everyone
+
+**Map controls:** the **Risk / Rain / Wind** tabs recolour the entire hex surface (and the legend) live; the **◎ My area** button asks the browser for GPS, drops a *“Your location”* pin with its accuracy radius and flies there. Zooming in refines the hexes down to 16 km cells across the whole country — the Google Flood Hub pattern.
 
 The flow is intentionally zero-friction:
 
@@ -156,7 +159,9 @@ Subscribers live in `backend/data/telegram_store.json`. On Render, the blueprint
 
 **Nothing is broken in your build.** CARTO changed its free raster basemap CDN: since **25 September 2026**, tile requests without a key return HTTP **200** with a watermark reading **“API KEY REQUIRED · carto.com/basemaps/apikey”**. A 200 response raises no MapLibre error, so the old automatic fallback could never notice it.
 
-This build therefore **does not use CARTO by default**. It renders a genuinely keyless dark basemap (**Esri World Dark Gray** + its label layer) and switches to **OpenStreetMap** automatically if that provider is blocked. You need **no key at all** — not CARTO, MapTiler, Mapbox or Stadia.
+This build therefore **does not use CARTO by default**. It renders a genuinely keyless, quiet basemap (**Esri World Light Gray** + its label layer) so the risk colours are the only loud thing on screen, and switches to **OpenStreetMap** automatically if that provider is blocked. You need **no key at all** — not CARTO, MapTiler, Mapbox or Stadia.
+
+Want the map dark instead of light? Set `VITE_MAP_THEME=dark` (uses the keyless Esri dark canvas).
 
 Want CARTO's exact look back? Request the free key (5M tiles/month, no account) at <https://carto.com/basemaps/apikey>, then set on Vercel:
 

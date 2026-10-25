@@ -1867,7 +1867,7 @@ async def risk_grid() -> Dict:
         "items": results,
     }
     live_count = sum(1 for item in results if item.get("has_live_data"))
-    cache_ttl = 600 if live_count >= max(4, len(results) // 3) else 120
+    cache_ttl = 600 if live_count >= max(4, len(results) // 3) else 300
     grid_cache[cache_key] = {"ts": datetime.now(timezone.utc).timestamp(), "ttl": cache_ttl, "data": data}
     return data
 
@@ -2967,14 +2967,26 @@ def _coerce_float(value) -> float | None:
         return None
 
 
+async def warm_risk_grid() -> None:
+    try:
+        await risk_grid()
+        logger.info("Risk grid warmed for the dashboard")
+    except Exception as exc:
+        logger.info("Risk grid warmup skipped: %s", safe_error_message(exc))
+
+
 async def process_alert_checks() -> Dict:
-    """Automatic alert sweep across every Telegram account that started the bot."""
+    """Automatic alert sweep across every Telegram account that started the bot.
+
+    The grid is refreshed even with zero subscribers so the dashboard always has a
+    warm cache and alert evaluation stays fast.
+    """
     sync_subscriptions_from_profiles()
-    if not subscriptions:
-        return {"ok": True, "alerts_sent": 0, "evaluated": 0, "skipped": 0}
 
     grid = await risk_grid()
     items = grid.get("items", [])
+    if not subscriptions:
+        return {"ok": True, "alerts_sent": 0, "evaluated": 0, "skipped": 0}
     if not items:
         return {"ok": True, "alerts_sent": 0, "evaluated": len(subscriptions), "skipped": 0}
 
@@ -3180,6 +3192,9 @@ async def startup_event() -> None:
 
     has_telegram = bool(telegram_token())
     webhook_mode = bool(os.getenv("TELEGRAM_WEBHOOK_URL", "").strip())
+
+    # Warm the risk grid once so the first dashboard load is instant.
+    telegram_runtime_state["warmup_task"] = asyncio.create_task(warm_risk_grid())
 
     if has_telegram:
         await configure_telegram_commands()

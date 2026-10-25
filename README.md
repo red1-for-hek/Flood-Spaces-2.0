@@ -188,6 +188,7 @@ Full walkthrough: [DEPLOYMENT.md](DEPLOYMENT.md).
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
+| Toast: "A background request failed — … 'M_ID'" | A **third-party** script (preview harness / browser extension / analytics) rejects a promise. That identifier does not exist in this codebase or its bundle. | Harmless — dismiss it, or open the site in a clean tab. Errors are also stored in `window.__floodSpacesErrors` |
 | Intro shows, then a blank page | WebGL blocked (sandboxed iframe, disabled GPU acceleration) — MapLibre used to throw and unmount React | Fixed: the map now detects WebGL2 and renders a *zone list* fallback; an error boundary + crash overlay keep the rest of the dashboard alive |
 | "Map view unavailable" panel | Same WebGL limitation | Enable hardware acceleration / open outside the embedded frame, or keep using the zone list |
 | Everything shows `n/a` / 0 mm | Backend can't reach Open-Meteo / NASA from its host | Check `/api/upstream-status`; the banner tells you when feeds are degraded |
@@ -211,6 +212,7 @@ npm run build       # production bundle
 npm run smoke        # renders the app tree with mocked APIs
 npm run smoke:nowebgl# same, with WebGL blocked (map fallback path)
 npm run smoke:entry  # boots the real src/main.tsx (StrictMode + boundaries)
+npm run smoke:crash  # injects a third-party rejection: toast, never a blank page
 npm run smoke:all    # all three
 ```
 

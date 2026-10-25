@@ -3,7 +3,12 @@ type Handler = (...args: unknown[]) => void;
 
 export class Map {
   private handlers: Record<string, Handler[]> = {};
-  constructor(_opts: unknown) {}
+  constructor(opts: unknown) {
+    // Exposed so smoke tests can assert which basemap the panel requested.
+    (globalThis as Record<string, unknown>).__maplibreLastStyle = (
+      opts as { style?: unknown } | undefined
+    )?.style;
+  }
   addControl() {}
   addSource() {}
   addLayer() {}

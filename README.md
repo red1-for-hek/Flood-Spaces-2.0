@@ -16,7 +16,7 @@
 | 🗺️ **Risk map** | Dark CARTO basemap (no API key), risk hexes, district/upazila overlays, river-watch pins, live global flood events, click-anywhere inspection |
 | 🧠 **AI copilot** | Groq `openai/gpt-oss-20b`, token-streamed chat with stop button, plus area briefings |
 | 🚨 **Automatic Telegram alerts** | Anyone who presses **Start** is subscribed instantly — alerts are pushed with no dashboard open |
-| 📊 **Command center UI** | KPI strip, risk gauge, confidence, 1-month outlook, river discharge, 7-day trend + weather |
+| 📊 **Dashboard UI** | KPI strip, risk gauge, confidence, 1-month outlook, river discharge, 7-day trend + weather |
 | 🛰️ **Data pipeline** | Open-Meteo forecast & flood API, NASA POWER precipitation, NASA EONET + GDACS events, OpenWeather fallback |
 | 🌍 **Search** | English + Bengali place search, geolocation, reverse-geocoded names |
 
@@ -88,7 +88,8 @@ Open **http://localhost:5173** (the dev server proxies `/api` to `http://127.0.0
 | --- | --- | --- |
 | `VITE_API_BASE_URL` | Yes (prod) | Backend URL, e.g. `https://flood-spaces-api.onrender.com` |
 | `VITE_TELEGRAM_BOT_USERNAME` | Optional | Bot username for the “Open bot” button |
-| `VITE_MAP_TILES` | Optional | Custom raster tile template(s) — **no key required by default** |
+| `VITE_MAP_TILES` | Optional | Custom raster tile template(s), comma-separated — keyless providers work out of the box |
+| `VITE_CARTO_KEY` | Optional | Free CARTO basemap key — switches the dark basemap to CARTO Dark Matter |
 
 ---
 
@@ -102,12 +103,38 @@ The flow is intentionally zero-friction:
 4. Every 5 minutes the scheduler evaluates the risk grid and pushes an alert if a zone in range crosses the subscriber's threshold.
 5. Alerts are de-duplicated with a cooldown window and only escalate when risk rises.
 
-### Setup
+### Setup (10 minutes, once)
 
-1. Create a bot with **@BotFather** → copy the token into `TELEGRAM_BOT_TOKEN`.
-2. Set `TELEGRAM_BOT_USERNAME` to the bot's username (without `@`).
-3. Run the backend. With no webhook URL configured it auto-polls Telegram.
-4. Optional: set `TELEGRAM_WEBHOOK_URL=https://your-api.onrender.com` and restart (or call `POST /api/telegram/setup-webhook`) to use webhooks.
+1. **@BotFather → `/newbot`** → pick a name and a username → copy the token (`123456:AA…`).
+2. On the **backend host** (Render → Environment) set:
+
+```env
+TELEGRAM_BOT_TOKEN=123456:AA...
+TELEGRAM_BOT_USERNAME=YourFloodBot     # without the @
+GROQ_API_KEY=gsk_...                   # AI chat
+FRONTEND_ORIGIN=https://floodspaces.vercel.app
+```
+
+3. Leave `TELEGRAM_WEBHOOK_URL` **empty on Render** — the bot long-polls Telegram every 5 s and needs no public webhook. (Vercel mode is different: see [DEPLOYMENT.md §0](DEPLOYMENT.md#0-can-i-just-keep-the-backend-on-vercel).)
+4. Redeploy the service, then verify:
+
+```bash
+curl https://<your-api>/api/telegram/bot-info
+# -> {"configured": true, "username": "YourFloodBot", "webhook_mode": false}
+```
+
+5. Open `https://t.me/YourFloodBot` → press **Start**. That *is* the subscription: the chat is stored automatically and starts receiving alerts. No dashboard visit, no chat-ID copy/paste.
+6. Confirm delivery with **Send test alert** in the dashboard, or:
+
+```bash
+curl -X POST "https://<your-api>/api/alerts/test?chat_id=<chat_id>"
+```
+
+Only when you run the backend behind a public URL **with** `TELEGRAM_WEBHOOK_URL` set, register the webhook once:
+
+```bash
+curl -X POST https://<your-api>/api/telegram/setup-webhook
+```
 
 Bot commands: `/start`, `/stop`, `/help`, `/settings`, `/summary`.
 
@@ -125,15 +152,25 @@ Subscribers live in `backend/data/telegram_store.json`. On Render, the blueprint
 
 ---
 
-## 🗺️ About the map “API key required” error
+## 🗺️ The map “API key required” watermark — explained
 
-The map ships with **CARTO dark raster tiles, which need no key**, and automatically falls back to **OpenStreetMap tiles** if the basemap is blocked or a keyed provider rejects requests. You do **not** need an OpenStreetMap/MapTiler/Mapbox key.
+**Nothing is broken in your build.** CARTO changed its free raster basemap CDN: since **25 September 2026**, tile requests without a key return HTTP **200** with a watermark reading **“API KEY REQUIRED · carto.com/basemaps/apikey”**. A 200 response raises no MapLibre error, so the old automatic fallback could never notice it.
 
-If you previously saw *“API key required”*, it comes from a keyed vector style (MapTiler / Mapbox / Stadia). This build removed that dependency. Optionally override tiles:
+This build therefore **does not use CARTO by default**. It renders a genuinely keyless dark basemap (**Esri World Dark Gray** + its label layer) and switches to **OpenStreetMap** automatically if that provider is blocked. You need **no key at all** — not CARTO, MapTiler, Mapbox or Stadia.
+
+Want CARTO's exact look back? Request the free key (5M tiles/month, no account) at <https://carto.com/basemaps/apikey>, then set on Vercel:
 
 ```env
-VITE_MAP_TILES=https://tile.openstreetmap.org/{z}/{x}/{y}.png
+VITE_CARTO_KEY=your_carto_key
 ```
+
+The dashboard appends `?key=…` for you. Any custom template also works:
+
+```env
+VITE_MAP_TILES=https://basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}@2x.png?key=YOUR_KEY
+```
+
+If a CARTO URL is configured **without** a key, the app detects it, ignores it and keeps the keyless dark basemap — so the watermark cannot come back.
 
 ---
 
@@ -150,14 +187,27 @@ VITE_MAP_TILES=https://tile.openstreetmap.org/{z}/{x}/{y}.png
 > cron hitting `/api/cron/alerts`, but subscribers are lost on cold starts. See
 > [DEPLOYMENT.md → “Can I just keep the backend on Vercel?”](DEPLOYMENT.md#0-can-i-just-keep-the-backend-on-vercel).
 
+### Vercel environment variables (frontend)
+
+Project → **Settings → Environment Variables** (add to *Production* and *Preview*), then **Deployments → Redeploy**. `VITE_*` values are baked in at build time, so changing one only takes effect after a new build.
+
+| Variable | Value | Required |
+| --- | --- | --- |
+| `VITE_API_BASE_URL` | `https://flood-spaces-api.onrender.com` — your backend URL, no trailing slash | ✅ |
+| `VITE_TELEGRAM_BOT_USERNAME` | `YourFloodBot` | optional |
+| `VITE_CARTO_KEY` | free CARTO basemap key | optional |
+| `VITE_MAP_TILES` | custom tile template | optional |
+
+Project **Root Directory must be `frontend`**, Framework preset **Vite**, Build `npm run build`, Output `dist` (all set by `frontend/vercel.json`).
+
 ### Render (recommended, ~5 minutes)
 
 1. Push this repo to GitHub.
 2. Render → **New → Blueprint** → select the repo. `render.yaml` is detected.
-3. Set secret env vars: `GROQ_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, `FRONTEND_ORIGIN`.
+3. Set secret env vars: `GROQ_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, `FRONTEND_ORIGIN=https://floodspaces.vercel.app`.
    - Pick the **Starter** plan (or keep Free + external uptime pings — the free tier sleeps and pauses alerts).
 4. Copy the service URL, then on Vercel set `VITE_API_BASE_URL=https://your-service.onrender.com` and redeploy.
-5. (Optional) set `TELEGRAM_WEBHOOK_URL` to the same Render URL, then restart the service.
+5. Leave `TELEGRAM_WEBHOOK_URL` empty so the bot keeps long-polling (no extra setup).
 
 Full walkthrough: [DEPLOYMENT.md](DEPLOYMENT.md).
 

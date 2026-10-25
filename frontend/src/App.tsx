@@ -673,7 +673,7 @@ export default function App() {
             <span className="eyebrow">
               <span className="eyebrow-dot" /> Bangladesh · live intelligence
             </span>
-            <h1>Flood command center</h1>
+            <h1>Flood Spaces</h1>
           </div>
 
           <div className="search-shell">

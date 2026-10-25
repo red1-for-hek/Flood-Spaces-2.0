@@ -398,6 +398,51 @@ function popupMarkup(properties: Record<string, unknown>): string {
   return `<strong>${name}</strong>${riverTag}<br/>Risk: ${level} (${score})<br/>Confidence: ${confidence}%<br/>Rain 24h: ${rain} mm<br/>River: ${river} m3/s<br/>NASA Precip: ${nasa} mm<br/>Wind: ${wind} km/h${sourcePoint}`;
 }
 
+const OSM_TILES = ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"];
+const OSM_ATTRIBUTION = "© OpenStreetMap contributors";
+
+// CARTO's free raster CDN started requiring an API key in September 2026.
+// Unkeyed requests still answer 200, but every tile is stamped
+// "API KEY REQUIRED · carto.com/basemaps/apikey" — and because the status is
+// 200, MapLibre never emits an error, so a fallback can't detect it.
+// Default to a genuinely keyless dark basemap instead.
+const ESRI_DARK_BASE =
+  "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}";
+const ESRI_DARK_LABELS =
+  "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}";
+const ESRI_ATTRIBUTION = "Basemap © Esri, HERE, Garmin, © OpenStreetMap contributors";
+
+type BasemapPlan = {
+  tiles: string[];
+  labels: string[] | null;
+  attribution: string;
+  note: string;
+};
+
+const keylessDarkBasemap: BasemapPlan = {
+  tiles: [ESRI_DARK_BASE],
+  labels: [ESRI_DARK_LABELS],
+  attribution: ESRI_ATTRIBUTION,
+  note: ""
+};
+
+function isCartoTile(url: string): boolean {
+  return /basemaps\.cartocdn\.com/i.test(url);
+}
+
+function cartoTiles(key: string): string[] {
+  return [`https://basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}@2x.png?key=${encodeURIComponent(key)}`];
+}
+
+// Returns null when the URL is a CARTO tile without a key, because that renders
+// a permanent watermark instead of a usable basemap.
+function applyCartoKey(url: string, key: string): string | null {
+  if (!isCartoTile(url) || /[?&]key=/i.test(url)) {
+    return url;
+  }
+  return key ? `${url}${url.includes("?") ? "&" : "?"}key=${encodeURIComponent(key)}` : null;
+}
+
 export default function MapPanel({
   points,
   densePoints,
@@ -441,31 +486,88 @@ export default function MapPanel({
     });
   }, [focusPoint]);
 
+  const basemap = useMemo<BasemapPlan>(() => {
+    const envTiles = (import.meta.env.VITE_MAP_TILES || "")
+      .split(",")
+      .map((url) => url.trim())
+      .filter(Boolean);
+    const cartoKey = (import.meta.env.VITE_CARTO_KEY || "").trim();
+
+    if (envTiles.length) {
+      const keyed = envTiles
+        .map((url) => applyCartoKey(url, cartoKey))
+        .filter((url): url is string => Boolean(url));
+      if (keyed.length) {
+        const usesCarto = keyed.some(isCartoTile);
+        return {
+          tiles: keyed,
+          labels: null,
+          attribution: usesCarto ? "© OpenStreetMap contributors © CARTO" : OSM_ATTRIBUTION,
+          note: ""
+        };
+      }
+      // CARTO answers keyless raster requests with HTTP 200 + a baked-in
+      // "API KEY REQUIRED" watermark, so MapLibre never fires an error and the
+      // fallback below can't kick in. Refuse keyless CARTO URLs up front.
+      return {
+        ...keylessDarkBasemap,
+        note: "CARTO basemaps now need a free key — showing the keyless dark map. Set VITE_CARTO_KEY to use your own tiles."
+      };
+    }
+
+    if (cartoKey) {
+      return {
+        tiles: cartoTiles(cartoKey),
+        labels: null,
+        attribution: "© OpenStreetMap contributors © CARTO",
+        note: ""
+      };
+    }
+
+    return keylessDarkBasemap;
+  }, []);
+
   const baseStyle = useMemo(() => {
-    const envTiles = (import.meta.env.VITE_MAP_TILES || "").trim();
-    const tileSets = envTiles
-      ? envTiles.split(",").map((url: string) => url.trim()).filter(Boolean)
-      : [
-          "https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png",
-          "https://b.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png",
-          "https://c.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png"
-        ];
+    const sources: Record<string, unknown> = {
+      basemap: {
+        type: "raster",
+        tiles: basemap.tiles,
+        tileSize: 256,
+        attribution: `${basemap.attribution} · Flood Spaces risk layer`
+      }
+    };
+    const layers: Record<string, unknown>[] = [
+      { id: "basemap", type: "raster", source: "basemap", paint: { "raster-opacity": 0.92 } }
+    ];
+
+    if (basemap.labels) {
+      sources["basemap-labels"] = {
+        type: "raster",
+        tiles: basemap.labels,
+        tileSize: 256,
+        attribution: basemap.attribution
+      };
+      layers.push({
+        id: "basemap-labels",
+        type: "raster",
+        source: "basemap-labels",
+        paint: { "raster-opacity": 0.9 }
+      });
+    }
 
     return {
       version: 8,
       glyphs: "https://fonts.openmaptiles.org/{fontstack}/{range}.pbf",
-      sources: {
-        basemap: {
-          type: "raster",
-          tiles: tileSets,
-          tileSize: 256,
-          attribution:
-            "© OpenStreetMap contributors © CARTO · Flood Spaces risk layer"
-        }
-      },
-      layers: [{ id: "basemap", type: "raster", source: "basemap", paint: { "raster-opacity": 0.92 } }]
+      sources,
+      layers
     } as never;
-  }, []);
+  }, [basemap]);
+
+  useEffect(() => {
+    if (basemap.note) {
+      setTileWarning((current) => current || basemap.note);
+    }
+  }, [basemap.note]);
 
   const topZones = useMemo(
     () =>
@@ -709,13 +811,16 @@ export default function MapPanel({
         return;
       }
       tileFallbackApplied = true;
-      const source = map.getSource("basemap") as maplibregl.RasterTileSource | undefined;
       try {
-        (source as unknown as { setTiles?: (tiles: string[]) => void })?.setTiles?.([
-          "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
-        ]);
-        setTileWarning("Using OpenStreetMap fallback tiles.");
-      } catch {
+        const source = map.getSource("basemap") as maplibregl.RasterTileSource | undefined;
+        source?.setTiles(OSM_TILES);
+        // OSM raster tiles already include labels — hide the Esri label layer.
+        if (map.getLayer("basemap-labels")) {
+          map.setLayoutProperty("basemap-labels", "visibility", "none");
+        }
+        setTileWarning("Basemap provider unavailable — using keyless OpenStreetMap tiles.");
+      } catch (error) {
+        console.warn("[Flood Spaces] Basemap fallback failed:", error);
         setTileWarning("Basemap tiles are unavailable right now.");
       }
     };

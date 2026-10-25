@@ -177,6 +177,12 @@ export default function App() {
   const [districtBoundaries, setDistrictBoundaries] = useState<Record<string, unknown> | null>(null);
   const [upazilaBoundaries, setUpazilaBoundaries] = useState<Record<string, unknown> | null>(null);
   const [locationAccuracyMeters, setLocationAccuracyMeters] = useState<number | null>(null);
+  const [userLocation, setUserLocation] = useState<{
+    lat: number;
+    lon: number;
+    accuracy: number;
+    nonce: number;
+  } | null>(null);
   const [focusPoint, setFocusPoint] = useState<{ lat: number; lon: number; name: string; nonce: number } | null>(null);
 
   const [mapMode, setMapMode] = useState<MapMode>("risk");
@@ -419,6 +425,12 @@ export default function App() {
         const accuracy = Number.isFinite(pos.coords.accuracy)
           ? Math.min(Math.max(pos.coords.accuracy, 30), 5000)
           : undefined;
+        setUserLocation({
+          lat: pos.coords.latitude,
+          lon: pos.coords.longitude,
+          accuracy: accuracy ?? 250,
+          nonce: Date.now()
+        });
         const point = await handleMapClick(pos.coords.latitude, pos.coords.longitude, undefined, accuracy);
         if (point) {
           setFocusPoint({ lat: point.lat, lon: point.lon, name: point.name, nonce: Date.now() });
@@ -869,6 +881,13 @@ export default function App() {
                       onClick={() => setMapMode(mode)}
                       role="tab"
                       aria-selected={mapMode === mode}
+                      title={
+                        mode === "risk"
+                          ? "Colour the hex grid by composite flood risk"
+                          : mode === "rain"
+                            ? "Colour the hex grid by 24-hour rainfall"
+                            : "Colour the hex grid by wind speed"
+                      }
                     >
                       {mode === "risk" ? "Risk" : mode === "rain" ? "Rain" : "Wind"}
                     </button>
@@ -902,6 +921,7 @@ export default function App() {
                   highlightPoint={selected ? { lat: selected.lat, lon: selected.lon, name: selected.name } : null}
                   focusPoint={focusPoint}
                   highlightAccuracyMeters={locationAccuracyMeters}
+                  userLocation={userLocation}
                   mode={mapMode}
                   globalFloodEvents={globalFloodEvents}
                   countryBoundary={countryBoundary}
@@ -909,6 +929,14 @@ export default function App() {
                   upazilaBoundaries={upazilaBoundaries}
                 />
               </ErrorBoundary>
+              <div className={`map-mode-chip mode-${mapMode}`}>
+                <span className="map-mode-swatch" />
+                {mapMode === "risk"
+                  ? "Risk index · 0–100"
+                  : mapMode === "rain"
+                    ? "24h rainfall · mm"
+                    : "Wind · km/h"}
+              </div>
               {mapMode === "risk" ? (
                 <div className="map-legend">
                   <span><i className="dot low" /> Normal</span>

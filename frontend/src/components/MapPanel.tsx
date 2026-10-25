@@ -15,6 +15,7 @@ type Props = {
   highlightPoint: { lat: number; lon: number; name: string } | null;
   focusPoint?: { lat: number; lon: number; name: string; nonce: number } | null;
   highlightAccuracyMeters: number | null;
+  userLocation?: { lat: number; lon: number; accuracy: number; nonce: number } | null;
   mode: MapMode;
   globalFloodEvents: GlobalFloodEvent[];
   countryBoundary: Record<string, unknown> | null;
@@ -71,16 +72,6 @@ function destinationPoint(lat: number, lon: number, bearingRad: number, distance
     );
 
   return [((lambda2 * 180) / Math.PI + 540) % 360 - 180, (phi2 * 180) / Math.PI];
-}
-
-function viewportWidthKm(map: Map): number {
-  const bounds = map.getBounds();
-  let lonSpan = Math.abs(bounds.getEast() - bounds.getWest());
-  if (lonSpan > 180) {
-    lonSpan = 360 - lonSpan;
-  }
-  const latitudeFactor = Math.cos((map.getCenter().lat * Math.PI) / 180);
-  return Math.max(0, lonSpan * 111.32 * Math.max(0.1, latitudeFactor));
 }
 
 function emptyFeatureCollection(): GenericFeatureCollection {
@@ -381,6 +372,199 @@ function buildHexData(sourceData: GenericFeatureCollection): GenericFeatureColle
   };
 }
 
+type Ring = Array<[number, number]>;
+
+function extractPolygons(boundary: Record<string, unknown> | null): Ring[][] {
+  const polygons: Ring[][] = [];
+  if (!boundary || typeof boundary !== "object") {
+    return polygons;
+  }
+
+  const visitGeometry = (geometry: unknown) => {
+    if (!geometry || typeof geometry !== "object") {
+      return;
+    }
+    const typed = geometry as { type?: unknown; coordinates?: unknown; geometries?: unknown };
+    const geometryType = String(typed.type || "");
+
+    if (geometryType === "Polygon" && Array.isArray(typed.coordinates)) {
+      const rings = (typed.coordinates as unknown[]).map(asRing).filter((ring) => ring.length >= 3);
+      if (rings.length) {
+        polygons.push(rings);
+      }
+      return;
+    }
+
+    if (geometryType === "MultiPolygon" && Array.isArray(typed.coordinates)) {
+      for (const polygon of typed.coordinates as unknown[]) {
+        if (!Array.isArray(polygon)) continue;
+        const rings = (polygon as unknown[]).map(asRing).filter((ring) => ring.length >= 3);
+        if (rings.length) {
+          polygons.push(rings);
+        }
+      }
+      return;
+    }
+
+    if (geometryType === "GeometryCollection" && Array.isArray(typed.geometries)) {
+      for (const child of typed.geometries as unknown[]) {
+        visitGeometry(child);
+      }
+    }
+  };
+
+  const visitNode = (node: unknown) => {
+    if (!node || typeof node !== "object") {
+      return;
+    }
+    const typed = node as { type?: unknown; features?: unknown; geometry?: unknown };
+    if (typed.type === "FeatureCollection" && Array.isArray(typed.features)) {
+      for (const feature of typed.features as unknown[]) {
+        visitNode(feature);
+      }
+      return;
+    }
+    if (typed.type === "Feature") {
+      visitGeometry(typed.geometry);
+      return;
+    }
+    visitGeometry(node);
+  };
+
+  visitNode(boundary);
+  return polygons;
+}
+
+function pointInRing(lon: number, lat: number, ring: Ring): boolean {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const xi = ring[i][0];
+    const yi = ring[i][1];
+    const xj = ring[j][0];
+    const yj = ring[j][1];
+    if (yi > lat !== yj > lat && lon < ((xj - xi) * (lat - yi)) / (yj - yi) + xi) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+function pointInPolygons(lon: number, lat: number, polygons: Ring[][]): boolean {
+  for (const polygon of polygons) {
+    if (!polygon.length || !pointInRing(lon, lat, polygon[0])) {
+      continue;
+    }
+    let inHole = false;
+    for (let idx = 1; idx < polygon.length; idx += 1) {
+      if (pointInRing(lon, lat, polygon[idx])) {
+        inHole = true;
+        break;
+      }
+    }
+    if (!inHole) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function hexagonRing(lat: number, lon: number, radiusKm: number): Ring {
+  const ring: Ring = [];
+  for (let corner = 0; corner < 6; corner += 1) {
+    ring.push(destinationPoint(lat, lon, (Math.PI / 3) * corner + Math.PI / 6, radiusKm * 1000));
+  }
+  ring.push(ring[0]);
+  return ring;
+}
+
+// Dense hexagonal risk surface clipped to the country outline (the Google
+// Flood Hub look): every cell takes the colour of its nearest forecast point,
+// scaled by whichever metric the toolbar is showing.
+export function buildCountryHexGrid(
+  boundary: Record<string, unknown> | null,
+  referencePoints: RiskPoint[],
+  mode: MapMode,
+  cellKm = 16
+): GenericFeatureCollection {
+  const polygons = extractPolygons(boundary);
+  if (!polygons.length || !referencePoints.length) {
+    return emptyFeatureCollection();
+  }
+
+  let minLon = Number.POSITIVE_INFINITY;
+  let maxLon = Number.NEGATIVE_INFINITY;
+  let minLat = Number.POSITIVE_INFINITY;
+  let maxLat = Number.NEGATIVE_INFINITY;
+
+  for (const polygon of polygons) {
+    for (const ring of polygon) {
+      for (const [lon, lat] of ring) {
+        if (!Number.isFinite(lon) || !Number.isFinite(lat)) continue;
+        minLon = Math.min(minLon, lon);
+        maxLon = Math.max(maxLon, lon);
+        minLat = Math.min(minLat, lat);
+        maxLat = Math.max(maxLat, lat);
+      }
+    }
+  }
+
+  if (!Number.isFinite(minLon) || !Number.isFinite(maxLon)) {
+    return emptyFeatureCollection();
+  }
+
+  const radiusKm = cellKm / Math.sqrt(3);
+  const rowStepKm = radiusKm * 1.5;
+  const midLat = (minLat + maxLat) / 2;
+  const kmPerLon = Math.max(1, 111.32 * Math.cos((midLat * Math.PI) / 180));
+  const features: GenericFeature[] = [];
+
+  let row = 0;
+  for (
+    let lat = minLat - rowStepKm / 110.574;
+    lat <= maxLat + rowStepKm / 110.574;
+    lat += rowStepKm / 110.574
+  ) {
+    const rowOffsetKm = row % 2 ? cellKm / 2 : 0;
+    for (
+      let lon = minLon - (cellKm / 2) / kmPerLon + rowOffsetKm / kmPerLon;
+      lon <= maxLon + (cellKm / 2) / kmPerLon;
+      lon += cellKm / kmPerLon
+    ) {
+      if (!pointInPolygons(lon, lat, polygons)) {
+        continue;
+      }
+
+      const nearest = nearestRiskPoint(lat, lon, referencePoints);
+      if (!nearest) {
+        continue;
+      }
+
+      features.push({
+        type: "Feature",
+        geometry: {
+          type: "Polygon",
+          coordinates: [hexagonRing(lat, lon, radiusKm)]
+        },
+        properties: {
+          name: nearest.name,
+          lat,
+          lon,
+          risk_score: nearest.risk_score,
+          risk_level: nearest.risk_level,
+          rainfall_24h_mm: nearest.rainfall_24h_mm,
+          wind_kmh: nearest.wind_kmh,
+          is_no_data: nearest.is_no_data,
+          color: pointColor(nearest, mode),
+          cell_km: cellKm
+        }
+      });
+    }
+    row += 1;
+  }
+
+  return { type: "FeatureCollection", features };
+}
+
 function popupMarkup(properties: Record<string, unknown>): string {
   const name = String(properties.name || "Selected Area");
   const riverName = properties.river_name ? String(properties.river_name) : "";
@@ -405,7 +589,12 @@ const OSM_ATTRIBUTION = "© OpenStreetMap contributors";
 // Unkeyed requests still answer 200, but every tile is stamped
 // "API KEY REQUIRED · carto.com/basemaps/apikey" — and because the status is
 // 200, MapLibre never emits an error, so a fallback can't detect it.
-// Default to a genuinely keyless dark basemap instead.
+// Default to a genuinely keyless basemap instead. The light canvas keeps the
+// cartography quiet so the risk hexes and dots are the only thing that pops.
+const ESRI_LIGHT_BASE =
+  "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}";
+const ESRI_LIGHT_LABELS =
+  "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}";
 const ESRI_DARK_BASE =
   "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}";
 const ESRI_DARK_LABELS =
@@ -419,12 +608,17 @@ type BasemapPlan = {
   note: string;
 };
 
-const keylessDarkBasemap: BasemapPlan = {
-  tiles: [ESRI_DARK_BASE],
-  labels: [ESRI_DARK_LABELS],
-  attribution: ESRI_ATTRIBUTION,
-  note: ""
-};
+const MAP_THEME = (import.meta.env.VITE_MAP_THEME || "light").trim().toLowerCase();
+
+function keylessBasemap(theme: string): BasemapPlan {
+  const dark = theme === "dark";
+  return {
+    tiles: [dark ? ESRI_DARK_BASE : ESRI_LIGHT_BASE],
+    labels: [dark ? ESRI_DARK_LABELS : ESRI_LIGHT_LABELS],
+    attribution: ESRI_ATTRIBUTION,
+    note: ""
+  };
+}
 
 function isCartoTile(url: string): boolean {
   return /basemaps\.cartocdn\.com/i.test(url);
@@ -453,6 +647,7 @@ export default function MapPanel({
   highlightPoint,
   focusPoint,
   highlightAccuracyMeters,
+  userLocation,
   mode,
   globalFloodEvents,
   countryBoundary,
@@ -510,8 +705,8 @@ export default function MapPanel({
       // "API KEY REQUIRED" watermark, so MapLibre never fires an error and the
       // fallback below can't kick in. Refuse keyless CARTO URLs up front.
       return {
-        ...keylessDarkBasemap,
-        note: "CARTO basemaps now need a free key — showing the keyless dark map. Set VITE_CARTO_KEY to use your own tiles."
+        ...keylessBasemap(MAP_THEME),
+        note: "CARTO basemaps now need a free key — showing the keyless map. Set VITE_CARTO_KEY to use your own tiles."
       };
     }
 
@@ -524,7 +719,7 @@ export default function MapPanel({
       };
     }
 
-    return keylessDarkBasemap;
+    return keylessBasemap(MAP_THEME);
   }, []);
 
   const baseStyle = useMemo(() => {
@@ -681,7 +876,11 @@ export default function MapPanel({
     [districtRenderData, upazilaIndicatorData]
   );
 
-  const hexData = useMemo(() => buildHexData(districtRenderData), [districtRenderData]);
+  const hexData = useMemo(() => {
+    const reference = [...points, ...densePoints];
+    const grid = buildCountryHexGrid(countryBoundary, reference, mode, 16);
+    return grid.features.length ? grid : buildHexData(districtRenderData);
+  }, [countryBoundary, densePoints, districtRenderData, mode, points]);
 
   const highlightData = useMemo(
     () => ({
@@ -732,6 +931,49 @@ export default function MapPanel({
       ]
     };
   }, [highlightAccuracyMeters, highlightPoint]);
+
+  const userLocationData = useMemo(() => {
+    if (!userLocation) {
+      return emptyFeatureCollection();
+    }
+    return {
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          geometry: {
+            type: "Point",
+            coordinates: [userLocation.lon, userLocation.lat]
+          },
+          properties: { name: "Your location" }
+        }
+      ]
+    };
+  }, [userLocation]);
+
+  const userAccuracyData = useMemo(() => {
+    if (!userLocation) {
+      return emptyFeatureCollection();
+    }
+    const accuracy = Math.min(Math.max(userLocation.accuracy || 250, 30), 5000);
+    const ring: Ring = [];
+    const steps = 48;
+    for (let idx = 0; idx <= steps; idx += 1) {
+      ring.push(
+        destinationPoint(userLocation.lat, userLocation.lon, (idx / steps) * Math.PI * 2, accuracy)
+      );
+    }
+    return {
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          geometry: { type: "Polygon", coordinates: [ring] },
+          properties: { accuracy_m: Math.round(accuracy) }
+        }
+      ]
+    };
+  }, [userLocation]);
 
   const globalFloodEventData = useMemo(
     () => ({
@@ -848,6 +1090,8 @@ export default function MapPanel({
       map.addSource("global-flood-events", { type: "geojson", data: empty as never });
       map.addSource("highlight-point", { type: "geojson", data: empty as never });
       map.addSource("highlight-accuracy", { type: "geojson", data: empty as never });
+      map.addSource("user-location", { type: "geojson", data: empty as never });
+      map.addSource("user-location-accuracy", { type: "geojson", data: empty as never });
 
       map.addLayer({
         id: "upazila-boundary-line",
@@ -923,15 +1167,21 @@ export default function MapPanel({
         }
       });
 
+      // Country-wide hex surface — every cell is drawn, exactly like Flood Hub;
+      // opacity rises with risk so low areas stay quiet under the basemap.
       map.addLayer({
         id: "risk-hex-fill",
         type: "fill",
         source: "risk-hexes",
-        minzoom: 3.8,
-        filter: ["all", ["!", ["get", "is_no_data"]], [">=", ["get", "risk_score"], 45]],
+        minzoom: 3.6,
         paint: {
           "fill-color": ["get", "color"],
-          "fill-opacity": ["case", ["==", ["get", "is_no_data"], true], 0.2, 0.5]
+          "fill-opacity": [
+            "case",
+            ["==", ["get", "is_no_data"], true],
+            0.05,
+            ["interpolate", ["linear"], ["get", "risk_score"], 0, 0.2, 40, 0.34, 70, 0.52, 100, 0.66]
+          ]
         }
       });
 
@@ -939,12 +1189,11 @@ export default function MapPanel({
         id: "risk-hex-outline",
         type: "line",
         source: "risk-hexes",
-        minzoom: 3.8,
-        filter: ["all", ["!", ["get", "is_no_data"]], [">=", ["get", "risk_score"], 45]],
+        minzoom: 3.6,
         paint: {
           "line-color": ["get", "color"],
-          "line-width": 1.1,
-          "line-opacity": 0.62
+          "line-width": ["interpolate", ["linear"], ["zoom"], 4, 0.45, 10, 0.9],
+          "line-opacity": 0.28
         }
       });
 
@@ -1115,31 +1364,10 @@ export default function MapPanel({
         }
       };
 
-      const syncRiskSignalRendering = () => {
-        const compactView = viewportWidthKm(map) <= 300;
-        const riskDotLayers = [
-          "global-risk-dot",
-          "district-risk-dot",
-          "risk-overview-dot",
-          "dense-risk",
-          "river-watch-dot",
-          "upazila-risk-pin-tail",
-          "upazila-risk-pin-head",
-          "upazila-risk-pin-core"
-        ];
-        const riskHexLayers = ["risk-hex-fill", "risk-hex-outline"];
-
-        for (const layerId of riskDotLayers) {
-          setVisibility(layerId, !compactView);
-        }
-        for (const layerId of riskHexLayers) {
-          setVisibility(layerId, compactView);
-        }
-      };
-
-      syncRiskSignalRendering();
-      map.on("zoomend", syncRiskSignalRendering);
-      map.on("moveend", syncRiskSignalRendering);
+      // The hex surface is always visible in all viewports (zoom handles the
+      // rest), so no resize/zoom toggling is needed anymore.
+      setVisibility("risk-hex-fill", true);
+      setVisibility("risk-hex-outline", true);
 
       map.addLayer({
         id: "highlight-accuracy-fill",
@@ -1190,6 +1418,72 @@ export default function MapPanel({
           "text-color": "#0f172a",
           "text-halo-color": "#ffffff",
           "text-halo-width": 1.5
+        }
+      });
+
+      // "You are here" — approximate GPS fix plus its accuracy radius.
+      map.addLayer({
+        id: "user-location-accuracy-fill",
+        type: "fill",
+        source: "user-location-accuracy",
+        paint: {
+          "fill-color": "#0891b2",
+          "fill-opacity": 0.12
+        }
+      });
+
+      map.addLayer({
+        id: "user-location-accuracy-outline",
+        type: "line",
+        source: "user-location-accuracy",
+        paint: {
+          "line-color": "#0e7490",
+          "line-width": 1.4,
+          "line-opacity": 0.7,
+          "line-dasharray": [2, 1.4]
+        }
+      });
+
+      map.addLayer({
+        id: "user-location-pulse",
+        type: "circle",
+        source: "user-location",
+        paint: {
+          "circle-color": "#22d3ee",
+          "circle-radius": ["interpolate", ["linear"], ["zoom"], 4, 16, 11, 30, 15, 44],
+          "circle-opacity": 0.18,
+          "circle-blur": 0.55
+        }
+      });
+
+      map.addLayer({
+        id: "user-location-dot",
+        type: "circle",
+        source: "user-location",
+        paint: {
+          "circle-color": "#0891b2",
+          "circle-radius": 7,
+          "circle-stroke-color": "#ffffff",
+          "circle-stroke-width": 2.4
+        }
+      });
+
+      map.addLayer({
+        id: "user-location-label",
+        type: "symbol",
+        source: "user-location",
+        layout: {
+          "text-field": "Your location",
+          "text-font": ["Noto Sans Bengali Regular", "Noto Sans Regular"],
+          "text-size": 11.5,
+          "text-offset": [0, 1.6],
+          "text-anchor": "top",
+          "text-allow-overlap": true
+        },
+        paint: {
+          "text-color": "#0e7490",
+          "text-halo-color": "#ffffff",
+          "text-halo-width": 1.8
         }
       });
 
@@ -1321,6 +1615,12 @@ export default function MapPanel({
       const accuracySource = map.getSource("highlight-accuracy") as maplibregl.GeoJSONSource | undefined;
       accuracySource?.setData(highlightAccuracyData as never);
 
+      const userLocationSource = map.getSource("user-location") as maplibregl.GeoJSONSource | undefined;
+      userLocationSource?.setData(userLocationData as never);
+
+      const userAccuracySource = map.getSource("user-location-accuracy") as maplibregl.GeoJSONSource | undefined;
+      userAccuracySource?.setData(userAccuracyData as never);
+
     };
 
     if (map.isStyleLoaded()) {
@@ -1343,7 +1643,9 @@ export default function MapPanel({
     sourceData,
     selectedName,
     upazilaBoundaries,
-    upazilaRenderData
+    upazilaRenderData,
+    userAccuracyData,
+    userLocationData
   ]);
 
   if (mapError) {

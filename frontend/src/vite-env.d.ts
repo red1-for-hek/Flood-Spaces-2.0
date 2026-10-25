@@ -5,6 +5,7 @@ interface ImportMetaEnv {
   readonly VITE_TELEGRAM_BOT_USERNAME?: string;
   readonly VITE_MAP_TILES?: string;
   readonly VITE_CARTO_KEY?: string;
+  readonly VITE_MAP_THEME?: string;
 }
 
 interface ImportMeta {

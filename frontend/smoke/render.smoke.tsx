@@ -248,10 +248,17 @@ async function main() {
       | { sources?: Record<string, { tiles?: string[] }> }
       | undefined;
     const tiles = style?.sources?.basemap?.tiles || [];
+    const layers = ((globalThis as Record<string, unknown>).__maplibreLayers || []) as Array<{
+      id?: string;
+      filter?: unknown;
+    }>;
+    const hexFill = layers.find((layer) => layer.id === "risk-hex-fill");
     checks.push(
       ["basemap needs no API key", !tiles.some((url) => /cartocdn\.com/i.test(url))],
-      ["keyless dark basemap configured", tiles.some((url) => /arcgisonline\.com/i.test(url))],
-      ["basemap label layer present", Boolean(style?.sources?.["basemap-labels"])]
+      ["keyless light basemap configured", tiles.some((url) => /World_Light_Gray_Base/i.test(url))],
+      ["basemap label layer present", Boolean(style?.sources?.["basemap-labels"])],
+      ["hex surface covers every cell", Boolean(hexFill) && hexFill?.filter === undefined],
+      ["location marker layer present", layers.some((layer) => layer.id === "user-location-dot")]
     );
   }
 

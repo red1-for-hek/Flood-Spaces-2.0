@@ -5,7 +5,7 @@
 | Component | Host | Plan |
 | --- | --- | --- |
 | React dashboard | **Vercel** | Hobby (free) |
-| FastAPI + alert scheduler + bot | **Render** web service | Starter ($7/mo) recommended, or Free + uptime pings |
+| FastAPI + alert scheduler + bot | **Render** web service | **Free Hobby (no card)** + 5-min ping, or Starter ($7/mo) for a disk |
 | AI | **Groq** API | Free tier is generous |
 
 **Vercel cannot host this backend for 24/7 alerts.** Serverless functions are killed after each request, so the APScheduler job that sweeps risk every 5 minutes never runs, and the JSON subscriber store is wiped. Keep Vercel for the frontend and move the API to a long-running host.
@@ -91,6 +91,24 @@ So: keep Vercel for the **frontend**, move the backend to Render/Railway/Fly whe
 reliable alerting. `/api/cron/alerts` exists precisely so a temporary Vercel deployment can
 still push alerts until you migrate.
 
+### Deploying the FastAPI backend as its own Vercel project
+
+This is possible — Vercel now auto-detects FastAPI — but it is **degraded mode**, not a
+replacement for a long-running host:
+
+1. Vercel → **Add New → Project** → same repo → **Root Directory `backend`** → Framework **FastAPI**.
+2. Env: `GROQ_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`,
+   `TELEGRAM_WEBHOOK_URL=https://<backend>.vercel.app`, `TELEGRAM_WEBHOOK_SECRET=<random>`,
+   `TELEGRAM_STATE_PATH=/tmp/telegram_store.json`, `FRONTEND_ORIGIN=https://floodspaces.vercel.app`.
+3. After deploy, register the webhook once: `POST https://<backend>.vercel.app/api/telegram/setup-webhook`.
+4. Create a free cron on cron-job.org hitting
+   `https://<backend>.vercel.app/api/cron/alerts?secret=<CRON_SECRET>` every 5 minutes.
+5. Set `VITE_API_BASE_URL=https://<backend>.vercel.app` on the frontend project and redeploy.
+
+What you lose: the in-process 5-minute scheduler (cron replaces it), Telegram long-polling (webhook
+replaces it) and durable subscribers (`/tmp` resets on cold starts — users may need to press Start
+again). Hobby plan function limits also apply to the 16-city forecast sweep.
+
 ---
 
 ## 1) Prepare the repository
@@ -101,7 +119,7 @@ git push origin main
 
 Files already included:
 
-- `render.yaml` — backend blueprint with a persistent disk
+- `render.yaml` — backend blueprint on the **free** plan (no card); comments show the paid upgrade for a persistent disk
 - `backend/Dockerfile` — image for Railway / Fly / any container host
 - `frontend/vercel.json` — SPA routing + asset caching
 
@@ -110,12 +128,16 @@ Files already included:
 ## 2) Deploy the backend (Render)
 
 1. **Render Dashboard → New → Blueprint** and choose your fork of this repo.
+   The blueprint requests `plan: free`, so the estimate is **$0/month** and Render asks for **no card**.
+   If an older service from this repo is already on your account, delete it first — it was created with
+   the paid Starter plan + disk.
 2. Render reads `render.yaml`:
    - root directory `backend`
    - `pip install -r requirements.txt`
    - `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
    - health check `/api/health`
-   - 1 GB disk mounted at `backend/data`
+   - **Free** instance type — no payment method required
+   - no disk on free (add one only after upgrading to Starter)
 3. Fill in environment variables:
 
 ```
@@ -148,11 +170,18 @@ https://<your-service>.onrender.com/api/telegram/bot-info
 | **Render Starter + 1 GB disk** | ~$7/mo | ✅ | ✅ |
 | **Oracle Cloud Always Free VM** | free | ✅ (self-managed docker) | ✅ (volume) |
 
-For a free build: choose Render **Free**, delete the `disk:` block from `render.yaml`, set
-`TELEGRAM_STATE_PATH` to the default (inside the app folder), and add a free UptimeRobot monitor
-hitting `https://<your-service>.onrender.com/api/health` every 5 minutes. Alerts keep flowing while
-the instance stays awake; subscribers are re-created only if Render restarts the instance — the bot
-replies to `/start` so anyone can re-subscribe in one tap.
+The checked-in `render.yaml` already does this: `plan: free`, no disk, and a free UptimeRobot
+monitor on `https://<your-service>.onrender.com/api/health` every 5 minutes keeps the instance awake.
+Alerts keep flowing while it stays awake; subscribers are re-created only if Render restarts the
+instance — the bot replies to `/start` so anyone can re-subscribe in one tap.
+
+**Watch the 750-hour pool.** Free workspaces get 750 instance-hours per month shared by every free
+service. One always-on service uses ~730. If you already run a second always-on free service, the
+workspace will exhaust its hours near month-end and Render suspends both until the 1st.
+
+**Render still asking for a card?** That happens when the blueprint asks for a paid instance or a
+disk. Make sure the service shows **Free** in its Settings → Instance Type, and that no `disk:` block
+exists. If your account is genuinely gated, use the Vercel fallback below.
 
 ### Why Starter, not Free?
 
@@ -296,6 +325,7 @@ VITE_CARTO_KEY=your_key
 - [ ] `/api/telegram/bot-info` shows `configured: true`
 - [ ] Starting the bot sends the welcome message
 - [ ] `POST /api/alerts/check` returns `{"ok": true, ...}`
-- [ ] Subscribers persist after a backend restart (disk mounted)
+- [ ] UptimeRobot 5-min monitor on `/api/health` is green (keeps the free instance awake)
+- [ ] (Paid + disk only) Subscribers persist after a backend restart
 - [ ] Vercel build succeeds with `npm run build`
 - [ ] `FRONTEND_ORIGIN` contains the Vercel domain

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import maplibregl, { Map } from "maplibre-gl";
 import type { GlobalFloodEvent, RiskPoint } from "../types";
 
@@ -12,6 +12,7 @@ type Props = {
   onMapClick: (lat: number, lon: number, name?: string) => void | Promise<unknown>;
   selectedName: string | null;
   highlightPoint: { lat: number; lon: number; name: string } | null;
+  focusPoint?: { lat: number; lon: number; name: string; nonce: number } | null;
   highlightAccuracyMeters: number | null;
   mode: MapMode;
   globalFloodEvents: GlobalFloodEvent[];
@@ -404,6 +405,7 @@ export default function MapPanel({
   onMapClick,
   selectedName,
   highlightPoint,
+  focusPoint,
   highlightAccuracyMeters,
   mode,
   globalFloodEvents,
@@ -412,7 +414,9 @@ export default function MapPanel({
   upazilaBoundaries
 }: Props) {
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
+  const [tileWarning, setTileWarning] = useState<string>("");
   const mapRef = useRef<Map | null>(null);
+  const lastFocusNonce = useRef<number>(0);
   const onSelectRef = useRef(onSelect);
   const onMapClickRef = useRef(onMapClick);
 
@@ -421,26 +425,45 @@ export default function MapPanel({
     onMapClickRef.current = onMapClick;
   }, [onMapClick, onSelect]);
 
-  const baseStyle = useMemo(
-    () => ({
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !focusPoint || focusPoint.nonce === lastFocusNonce.current) {
+      return;
+    }
+    lastFocusNonce.current = focusPoint.nonce;
+    map.flyTo({
+      center: [focusPoint.lon, focusPoint.lat],
+      zoom: Math.max(map.getZoom(), 8.4),
+      duration: 1100,
+      essential: true
+    });
+  }, [focusPoint]);
+
+  const baseStyle = useMemo(() => {
+    const envTiles = (import.meta.env.VITE_MAP_TILES || "").trim();
+    const tileSets = envTiles
+      ? envTiles.split(",").map((url: string) => url.trim()).filter(Boolean)
+      : [
+          "https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png",
+          "https://b.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png",
+          "https://c.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png"
+        ];
+
+    return {
       version: 8,
       glyphs: "https://fonts.openmaptiles.org/{fontstack}/{range}.pbf",
       sources: {
-        cartoLight: {
+        basemap: {
           type: "raster",
-          tiles: [
-            "https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png",
-            "https://b.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png",
-            "https://c.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png"
-          ],
+          tiles: tileSets,
           tileSize: 256,
-          attribution: "OpenStreetMap contributors, CARTO"
+          attribution:
+            "© OpenStreetMap contributors © CARTO · Flood Spaces risk layer"
         }
       },
-      layers: [{ id: "carto-light", type: "raster", source: "cartoLight" }]
-    }),
-    []
-  );
+      layers: [{ id: "basemap", type: "raster", source: "basemap", paint: { "raster-opacity": 0.92 } }]
+    } as never;
+  }, []);
 
   const countryVisibleNames = useMemo(
     () =>
@@ -640,15 +663,43 @@ export default function MapPanel({
     const map = new maplibregl.Map({
       container: mapContainerRef.current,
       style: baseStyle as never,
-      center: [15, 20],
-      zoom: 2.2,
+      center: [90.3563, 23.685],
+      zoom: 6.25,
       minZoom: 1,
       maxZoom: 18
     });
 
-    map.addControl(new maplibregl.NavigationControl(), "top-right");
+    map.addControl(new maplibregl.NavigationControl({ showCompass: true }), "top-right");
     map.addControl(new maplibregl.ScaleControl({ unit: "metric" }), "bottom-right");
+    map.addControl(new maplibregl.AttributionControl({ compact: true }), "bottom-right");
     mapRef.current = map;
+
+    // Resilient basemap: if the primary tile provider is blocked or asks for a key,
+    // transparently fall back to OpenStreetMap tiles. No API key is ever required.
+    let tileFallbackApplied = false;
+    const applyFallbackTiles = () => {
+      if (tileFallbackApplied) {
+        return;
+      }
+      tileFallbackApplied = true;
+      const source = map.getSource("basemap") as maplibregl.RasterTileSource | undefined;
+      try {
+        (source as unknown as { setTiles?: (tiles: string[]) => void })?.setTiles?.([
+          "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+        ]);
+        setTileWarning("Using OpenStreetMap fallback tiles.");
+      } catch {
+        setTileWarning("Basemap tiles are unavailable right now.");
+      }
+    };
+
+    map.on("error", (event) => {
+      const message = String((event as unknown as { error?: { message?: string } })?.error?.message || "");
+      const sourceId = String((event as unknown as { sourceId?: string })?.sourceId || "");
+      if (sourceId === "basemap" || /api key|unauthorized|forbidden|access token/i.test(message)) {
+        applyFallbackTiles();
+      }
+    });
 
     map.on("load", () => {
       const empty = emptyFeatureCollection();
@@ -1154,5 +1205,10 @@ export default function MapPanel({
     upazilaRenderData
   ]);
 
-  return <div className="map-panel" ref={mapContainerRef} />;
+  return (
+    <div className="map-shell">
+      <div className="map-panel" ref={mapContainerRef} />
+      {tileWarning ? <div className="map-tile-note">{tileWarning}</div> : null}
+    </div>
+  );
 }

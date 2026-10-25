@@ -1,170 +1,188 @@
 # 🌊 Flood Spaces 2.0
 
-> **A real-time, Bangladesh-focused flood forecasting and alert platform** built with a modern full-stack architecture.
+> **Real-time AI flood intelligence for Bangladesh** — live risk mapping, river watch, NASA/GDACS event feeds, a Groq-powered copilot and a Telegram bot that alerts every subscriber automatically.
 
-[![Live Demo](https://img.shields.io/badge/Live-Demo-00b894?style=for-the-badge&logo=vercel&logoColor=white)](https://floodspaces.vercel.app)
-[![Backend](https://img.shields.io/badge/Backend-FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white)](backend)
 [![Frontend](https://img.shields.io/badge/Frontend-React%20%2B%20TypeScript-3178c6?style=for-the-badge&logo=typescript&logoColor=white)](frontend)
+[![Backend](https://img.shields.io/badge/Backend-FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white)](backend)
+[![AI](https://img.shields.io/badge/AI-Groq%20%C2%B7%20gpt--oss--20b-f55036?style=for-the-badge&logo=openai&logoColor=white)](https://groq.com)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue?style=for-the-badge)](LICENSE)
 
-Flood Spaces 2.0 is a **working flood prediction model** that can estimate flood risk across Bangladesh, visualize risk on an interactive map, and send automated alerts (Telegram) for potentially dangerous zones.
+---
+
+## ✨ What's inside
+
+| Area | Highlights |
+| --- | --- |
+| 🗺️ **Risk map** | Dark CARTO basemap (no API key), risk hexes, district/upazila overlays, river-watch pins, live global flood events, click-anywhere inspection |
+| 🧠 **AI copilot** | Groq `openai/gpt-oss-20b` for area briefings and general chat (math, coding, safety plans, anything) |
+| 🚨 **Automatic Telegram alerts** | Anyone who presses **Start** is subscribed instantly — alerts are pushed with no dashboard open |
+| 📊 **Command center UI** | KPI strip, risk gauge, confidence, 1-month outlook, river discharge, 7-day trend + weather |
+| 🛰️ **Data pipeline** | Open-Meteo forecast & flood API, NASA POWER precipitation, NASA EONET + GDACS events, OpenWeather fallback |
+| 🌍 **Search** | English + Bengali place search, geolocation, reverse-geocoded names |
+
+> ⚠️ Educational / research-grade forecasting assistant. **Not** an official disaster-warning authority.
 
 ---
 
-## ✨ Core Features
+## 🧱 Stack
 
-- 🗺️ **Interactive Bangladesh risk map** with flood-risk markers across major regions
-- 📍 **Click-anywhere flood risk inspection** with reverse geocoded location name
-- 🧭 **My-location tracking** with visualized accuracy radius
-- 🧩 **Dynamic local risk cells** (5 km style local grid behavior)
-- 🌐 **Administrative boundaries** (country / district / upazila overlays)
-- 🔎 **Zoom-adaptive map detail** for better readability and context
-- 🌧️ **Map mode switching**: `Risk`, `Rain`, `Wind`
-- 🎨 **Color-coded severity levels**: low → flood
-- 📊 **Hover diagnostics**: rainfall, wind, discharge, confidence, anomaly hints
-- 🛰️ **Satellite anomaly-assisted scoring** for better flood awareness
-- 📅 **1-month outlook** for forecast zones
-- ⏱️ **3-day local forecast panel** for selected area planning
-- 🏞️ **Bangladesh river watch indicators** for major rivers
-- 🚨 **Telegram alert subscriptions** for high-risk nearby zones
-- 🤖 **AI risk briefing mode** (OpenRouter-powered, optional)
-- 💬 **General AI chat mode** for flood questions and map help
-- 🌍 **Bengali + English place search** support
-- ☎️ **Emergency contact panel** for quick access
+- **Frontend:** React 18, TypeScript, Vite, MapLibre GL, Recharts, lucide-react
+- **Backend:** FastAPI, APScheduler, httpx, numpy/pandas
+- **AI:** Groq Chat Completions API — `openai/gpt-oss-20b` (fallback: `llama-3.1-8b-instant`)
+- **Bot:** Telegram Bot API (auto-subscribe + automatic alert scheduler)
 
 ---
 
-## 🇧🇩 Why This Project Matters
+## 🚀 Local development
 
-Bangladesh is highly vulnerable to flood events. This project combines weather forecast, hydrological signals, and map-based UX into a single dashboard to support:
-
-- rapid risk awareness,
-- local-level interpretation,
-- and early alert delivery.
-
-> ⚠️ **Disclaimer:** This is an educational and research-grade forecasting assistant. It is **not** an official disaster-warning authority.
-
----
-
-## 🧱 Tech Stack
-
-### Frontend
-- **React + TypeScript + Vite**
-- CSS-based UI
-- Interactive map rendering and overlays
-
-### Backend
-- **FastAPI (Python)**
-- Flood risk engine + alert service
-- Scheduled server-side alert checks (every 5 minutes)
-
----
-
-## 📡 Data Sources
-
-- **Open-Meteo Forecast API** — hourly weather/precipitation
-- **Open-Meteo Flood API** — river discharge data
-- **NASA POWER precipitation data** — satellite-informed precipitation context
-- **Derived satellite anomaly signal** — used in risk interpretation
-- **OpenStreetMap tiles** — map base layer
-- **Nominatim + Photon** — geocoding and reverse geocoding
-- **geoBoundaries** — Bangladesh admin boundary layers
-- **OpenWeather** *(optional key)* — additional weather blending
-- **OpenRouter** *(optional key)* — AI analysis/chat
-- **Telegram Bot API** — alert delivery
-
----
-
-## 📁 Project Structure
-
-```text
-Flood-Spaces-2.0/
-├── backend/    # FastAPI service, risk logic, alert engine
-├── frontend/   # React + TypeScript flood dashboard
-└── README.md
-```
-
----
-
-## 🚀 Quick Start (Local Development)
-
-### 1) Run Backend
+### 1) Backend
 
 ```bash
 cd backend
 python3 -m venv .venv
-source .venv/bin/activate   # On Windows: .venv\Scripts\activate
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env
+cp .env.example .env               # add GROQ_API_KEY + TELEGRAM_BOT_TOKEN
 uvicorn app.main:app --reload --port 8004
 ```
 
-### 2) Run Frontend
+### 2) Frontend
 
 ```bash
 cd frontend
 npm install
-cp .env.example .env
+cp .env.example .env               # VITE_API_BASE_URL=http://localhost:8004
 npm run dev
 ```
 
-Open: **http://localhost:5173**
+Open **http://localhost:5173** (the dev server proxies `/api` to `http://127.0.0.1:8004`).
 
 ---
 
-## 🔐 Environment Variables
+## 🔐 Environment variables
 
 ### `backend/.env`
 
 | Variable | Required | Purpose |
-|---|---|---|
-| `TELEGRAM_BOT_TOKEN` | Yes (for alerts) | Telegram bot token from BotFather |
-| `OPENROUTER_API_KEY` | Optional | Enables AI summaries/chat |
-| `OPENROUTER_MODEL` | Optional | Model name for OpenRouter |
-| `OPENWEATHER_API_KEY` | Optional | Additional weather blending |
-| `ALERT_RADIUS_KM` | Optional | Default alert radius |
-| `FRONTEND_ORIGIN` | Optional | CORS origin (e.g., `http://localhost:5173`) |
+| --- | --- | --- |
+| `GROQ_API_KEY` | **Yes** (for AI) | Groq API key from [console.groq.com](https://console.groq.com/keys) |
+| `GROQ_MODEL` | Optional | Defaults to `openai/gpt-oss-20b` |
+| `GROQ_FALLBACK_MODEL` | Optional | Defaults to `llama-3.1-8b-instant` |
+| `GROQ_REASONING_EFFORT` | Optional | `low` (default), `medium`, `high` — low = fastest replies |
+| `TELEGRAM_BOT_TOKEN` | **Yes** (for alerts) | Token from [@BotFather](https://t.me/BotFather) |
+| `TELEGRAM_BOT_USERNAME` | Optional | Shown in the dashboard deep-link button |
+| `TELEGRAM_WEBHOOK_URL` | Optional | Public backend URL; switches bot to webhook mode |
+| `TELEGRAM_WEBHOOK_SECRET` | Optional | Secret validated on the webhook endpoint |
+| `TELEGRAM_STATE_PATH` | Optional | Where subscribers are persisted (default `backend/data/telegram_store.json`) |
+| `ALERT_DEFAULT_THRESHOLD` | Optional | Default alert threshold (50) |
+| `ALERT_RADIUS_KM` | Optional | Default alert radius (100) |
+| `ALERT_CHECK_INTERVAL_MINUTES` | Optional | Scheduler cycle (5) |
+| `ALERT_COOLDOWN_MINUTES` | Optional | Anti-spam window per chat (60) |
+| `OPENWEATHER_API_KEY` | Optional | Temperature blending + forecast fallback |
+| `NASA_API_KEY` | Optional | NASA POWER / EONET key |
+| `FRONTEND_ORIGIN` | Optional | Comma-separated allowed origins |
 
 ### `frontend/.env`
 
 | Variable | Required | Purpose |
-|---|---|---|
-| `VITE_API_BASE_URL` | Yes | Backend base URL (e.g., `http://localhost:8004`) |
+| --- | --- | --- |
+| `VITE_API_BASE_URL` | Yes (prod) | Backend URL, e.g. `https://flood-spaces-api.onrender.com` |
+| `VITE_TELEGRAM_BOT_USERNAME` | Optional | Bot username for the “Open bot” button |
+| `VITE_MAP_TILES` | Optional | Custom raster tile template(s) — **no key required by default** |
 
 ---
 
-## 🤖 Telegram Alert Setup (Quick)
+## 🤖 Telegram bot — automatic alerts for everyone
 
-1. Create a bot with **@BotFather** and copy the token.
-2. Start a conversation with your new bot.
-3. Obtain your Telegram chat ID.
-4. In the app, choose area + threshold + radius.
-5. Activate subscription to receive high-risk alerts.
+The flow is intentionally zero-friction:
+
+1. User opens your bot → presses **Start**.
+2. Backend subscribes that chat automatically (`alerts_enabled = true`) and persists it.
+3. User may share a location (or type a district) for local alerts — otherwise they get **nationwide Bangladesh** alerts.
+4. Every 5 minutes the scheduler evaluates the risk grid and pushes an alert if a zone in range crosses the subscriber's threshold.
+5. Alerts are de-duplicated with a cooldown window and only escalate when risk rises.
+
+### Setup
+
+1. Create a bot with **@BotFather** → copy the token into `TELEGRAM_BOT_TOKEN`.
+2. Set `TELEGRAM_BOT_USERNAME` to the bot's username (without `@`).
+3. Run the backend. With no webhook URL configured it auto-polls Telegram.
+4. Optional: set `TELEGRAM_WEBHOOK_URL=https://your-api.onrender.com` and restart (or call `POST /api/telegram/setup-webhook`) to use webhooks.
+
+Bot commands: `/start`, `/stop`, `/help`, `/settings`, `/summary`.
+
+Manual linking is still possible from the dashboard via **Link a chat ID manually** (uses `/api/alerts/subscribe`).
+
+### Persistence
+
+Subscribers live in `backend/data/telegram_store.json`. On Render, the blueprint mounts a 1 GB disk at that path. Without persistent storage, subscribers are lost when the process restarts.
 
 ---
 
-## ☁️ Deployment (Free-Friendly)
+## 🗺️ About the map “API key required” error
 
-- Deploy **frontend** on **Vercel**.
-- Deploy **backend** on a Python host (e.g., Render/Railway options as available).
-- Set `VITE_API_BASE_URL` in frontend deployment.
-- Configure backend env variables on server.
+The map ships with **CARTO dark raster tiles, which need no key**, and automatically falls back to **OpenStreetMap tiles** if the basemap is blocked or a keyed provider rejects requests. You do **not** need an OpenStreetMap/MapTiler/Mapbox key.
+
+If you previously saw *“API key required”*, it comes from a keyed vector style (MapTiler / Mapbox / Stadia). This build removed that dependency. Optionally override tiles:
+
+```env
+VITE_MAP_TILES=https://tile.openstreetmap.org/{z}/{x}/{y}.png
+```
 
 ---
 
-## 🧪 Model Philosophy
+## ☁️ Deployment — the important bit
 
-The risk engine uses an explainable weighted approach combining meteorological and hydrological signals. The objective is transparent, understandable risk scoring suitable for demonstration and practical educational use.
+**Do not run this backend on Vercel.** Vercel functions are short-lived and stateless: the 5-minute scheduler dies between requests and subscribers disappear. Use:
+
+| Piece | Host | Why |
+| --- | --- | --- |
+| Frontend | **Vercel** | Static Vite build, free, global CDN (config included in `frontend/vercel.json`) |
+| Backend + bot scheduler | **Render / Railway / Fly.io** | Long-running process needed for 24/7 alerts |
+
+### Render (recommended, ~5 minutes)
+
+1. Push this repo to GitHub.
+2. Render → **New → Blueprint** → select the repo. `render.yaml` is detected.
+3. Set secret env vars: `GROQ_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, `FRONTEND_ORIGIN`.
+   - Pick the **Starter** plan (or keep Free + external uptime pings — the free tier sleeps and pauses alerts).
+4. Copy the service URL, then on Vercel set `VITE_API_BASE_URL=https://your-service.onrender.com` and redeploy.
+5. (Optional) set `TELEGRAM_WEBHOOK_URL` to the same Render URL, then restart the service.
+
+Full walkthrough: [DEPLOYMENT.md](DEPLOYMENT.md).
+
+---
+
+## 📡 API reference (short)
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/health` | Liveness |
+| `GET` | `/api/risk-grid` | Bangladesh risk grid |
+| `GET` | `/api/location-risk?lat&lon` | Point risk inspection |
+| `GET` | `/api/bd-river-watch` | River discharge watch |
+| `GET` | `/api/global-flood-events` | NASA EONET + GDACS |
+| `POST` | `/api/ai/summary` | Groq area briefing |
+| `POST` | `/api/ai/chat` | Groq general chat |
+| `POST` | `/api/alerts/subscribe` | Link a Telegram chat manually |
+| `GET` | `/api/cron/alerts` | Cron-friendly alert sweep |
+| `GET` | `/api/telegram/bot-info` | Bot status for the dashboard |
+| `POST` | `/api/telegram/webhook` | Telegram webhook |
+| `POST` | `/api/telegram/setup-webhook` | Register the webhook |
+
+---
+
+## 🧪 Model philosophy
+
+An explainable weighted blend of rainfall intensity, 24-hour accumulation, wind, NASA satellite precipitation proxy and river discharge. Risk is capped and calibrated to avoid over-reporting severe conditions in normal weather. Global flood events add a proximity-based boost.
 
 ---
 
 ## 📄 License
 
-Licensed under the **Apache-2.0 License**. See [LICENSE](LICENSE).
+Apache-2.0 — see [LICENSE](LICENSE).
 
----
+## 🙌 Credits
 
-## 🙌 Contributing
-
-Contributions, suggestions, and issue reports are welcome.
-If you are working on flood resilience tools for Bangladesh, feel free to collaborate.
+Built by **Redoyanul Haque** and **Debmalya Dutta Teertha**.
+Data: Open-Meteo · NASA POWER / EONET · GDACS · OpenStreetMap · CARTO.

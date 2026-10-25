@@ -1,8 +1,11 @@
 import math
 import os
 import asyncio
+import json
 import re
 import html
+import time
+import logging
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Dict, List, Literal, Tuple
@@ -15,13 +18,18 @@ import openmeteo_requests
 import pandas as pd
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from requests_cache import CachedSession
 from retry_requests import retry
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
+logging.basicConfig(level=logging.INFO)
+logging.getLogger("urllib3").setLevel(logging.ERROR)
+logging.getLogger("requests_cache").setLevel(logging.ERROR)
+logger = logging.getLogger("floodspaces")
 
 app = FastAPI(title="Flood Spaces API", version="0.1.0")
 
@@ -48,7 +56,7 @@ frontend_origin = frontend_origins[0] if frontend_origins else "http://localhost
 app.add_middleware(
     CORSMiddleware,
     allow_origins=frontend_origins,
-    allow_origin_regex=r"https://.*\.(app\.github\.dev|githubpreview\.dev)$",
+    allow_origin_regex=r"https://.*\.(app\.github\.dev|githubpreview\.dev|vercel\.app)$",
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -84,8 +92,8 @@ MONTHLY_FORECAST_DAYS = 30
 SHORT_FORECAST_DAYS = 7
 
 TELEGRAM_POLL_INTERVAL_SECONDS = 5
-DEFAULT_TELEGRAM_RADIUS_KM = 100
-DEFAULT_TELEGRAM_THRESHOLD = 50
+DEFAULT_TELEGRAM_RADIUS_KM = int(os.getenv("ALERT_RADIUS_KM", "100") or 100)
+DEFAULT_TELEGRAM_THRESHOLD = int(os.getenv("ALERT_DEFAULT_THRESHOLD", "50") or 50)
 
 BANGLADESH_DISTRICTS = [
     "Bagerhat", "Bandarban", "Barguna", "Barishal", "Bhola", "Bogura", "Brahmanbaria", "Chandpur",
@@ -125,10 +133,10 @@ TELEGRAM_MAIN_MENU_BN = [
 
 class TelegramSubscription(BaseModel):
     chat_id: str
-    lat: float
-    lon: float
-    radius_km: float = Field(default=100, ge=10, le=200)
-    threshold: int = Field(default=70, ge=30, le=100)
+    lat: float | None = None
+    lon: float | None = None
+    radius_km: float = Field(default=100, ge=10, le=500)
+    threshold: int = Field(default=50, ge=20, le=100)
 
 
 class AIRequest(BaseModel):
@@ -140,6 +148,8 @@ class AIRequest(BaseModel):
     river_discharge_m3s: float = 0.0
     confidence_pct: int = 50
     forecast_steps: List[Dict] = Field(default_factory=list)
+    nearby_areas: str = ""
+    river_watch: str = ""
 
 
 class AIChatMessage(BaseModel):
@@ -169,13 +179,30 @@ def build_openmeteo_client() -> openmeteo_requests.Client | None:
         cache_dir = Path(__file__).resolve().parent.parent / ".cache"
         cache_dir.mkdir(parents=True, exist_ok=True)
         cache_session = CachedSession(str(cache_dir / "openmeteo_cache"), expire_after=900)
-        retry_session = retry(cache_session, retries=3, backoff_factor=0.35)
+        retry_session = retry(cache_session, retries=1, backoff_factor=0.25)
         return openmeteo_requests.Client(session=retry_session)
     except Exception:
         return None
 
 
 openmeteo_client = build_openmeteo_client()
+
+# Lightweight circuit breaker: when an upstream API is down, stop retrying it for a
+# short window so the dashboard still responds fast with graceful fallbacks.
+upstream_circuit: Dict[str, float] = {"open_meteo": 0.0, "nasa": 0.0, "river": 0.0}
+UPSTREAM_COOLDOWN_SECONDS = 45.0
+
+
+def circuit_open(name: str) -> bool:
+    return time.monotonic() < float(upstream_circuit.get(name, 0.0))
+
+
+def trip_circuit(name: str) -> None:
+    upstream_circuit[name] = time.monotonic() + UPSTREAM_COOLDOWN_SECONDS
+
+
+def reset_circuit(name: str) -> None:
+    upstream_circuit[name] = 0.0
 
 
 RIVER_WATCH_POINTS: List[Dict[str, float | str]] = [
@@ -268,7 +295,7 @@ def local_ai_fallback(messages: List[Dict[str, str]]) -> str:
 
     if "risk score" in last_user or "flood" in last_user or "evacu" in last_user:
         return (
-            "Local AI fallback (OpenRouter unavailable):\n"
+            "Local AI fallback (Groq unavailable):\n"
             "1) Monitor rainfall and waterlogging alerts every 2-3 hours.\n"
             "2) If roads are already waterlogged, move early to higher ground.\n"
             "3) Keep emergency phone, power bank, clean water, and dry food ready for 24-48h.\n"
@@ -276,7 +303,7 @@ def local_ai_fallback(messages: List[Dict[str, str]]) -> str:
         )
 
     return (
-        "Local AI fallback (OpenRouter unavailable): I can still help with general questions and project questions. "
+        "Local AI fallback (Groq unavailable): I can still help with general questions and project questions. "
         "For live web updates, I can provide guidance but may not have real-time browsing."
     )
 
@@ -384,26 +411,18 @@ def markdown_to_telegram_html(text: str) -> str:
     return merged
 
 
-def openrouter_model_candidates(profile: Literal["fast", "balanced"] = "fast") -> List[str]:
-    configured_model = os.getenv("OPENROUTER_MODEL", "").strip()
-    fast_model = os.getenv("OPENROUTER_FAST_MODEL", "").strip()
+def groq_model_candidates(profile: Literal["fast", "balanced"] = "fast") -> List[str]:
+    """Return Groq model candidates, primary first.
+
+    Default: openai/gpt-oss-20b (fast, cheap, strong reasoning).
+    """
+    primary = os.getenv("GROQ_MODEL", "").strip() or "openai/gpt-oss-20b"
+    fallback = os.getenv("GROQ_FALLBACK_MODEL", "").strip() or "llama-3.1-8b-instant"
 
     if profile == "balanced":
-        models = [
-            configured_model or "openrouter/auto",
-            "openrouter/auto",
-            "google/gemini-2.0-flash-exp:free",
-            "qwen/qwen-2.5-7b-instruct:free",
-        ]
+        models = [primary, "llama-3.3-70b-versatile", fallback]
     else:
-        models = [
-            fast_model or configured_model or "google/gemini-2.0-flash-exp:free",
-            "google/gemini-2.0-flash-exp:free",
-            "qwen/qwen-2.5-7b-instruct:free",
-            "meta-llama/llama-3.1-8b-instruct:free",
-            configured_model,
-            "openrouter/auto",
-        ]
+        models = [primary, fallback]
 
     return [model for model in dict.fromkeys(models) if model]
 
@@ -760,63 +779,84 @@ def generate_forecast_steps(payload: Dict, horizon_days: int = MONTHLY_FORECAST_
     return steps
 
 
-async def openrouter_chat_completion(
+async def groq_chat_completion(
     messages: List[Dict[str, str]],
-    temperature: float = 0.2,
-    max_tokens: int = 450,
+    temperature: float = 0.25,
+    max_tokens: int = 500,
     profile: Literal["fast", "balanced"] = "fast",
 ) -> Dict:
-    key = os.getenv("OPENROUTER_API_KEY", "").strip()
+    """Chat completion through Groq (OpenAI-compatible endpoint)."""
+    key = os.getenv("GROQ_API_KEY", "").strip()
     if not key:
         return {
             "text": local_ai_fallback(messages),
             "provider": "local-fallback",
             "provider_live": False,
             "provider_model": None,
-            "provider_reason": "missing_openrouter_api_key",
+            "provider_reason": "missing_groq_api_key",
         }
 
-    models = openrouter_model_candidates(profile)
-    referer = os.getenv("OPENROUTER_SITE_URL", frontend_origin).strip() or "http://localhost:5173"
-    title = os.getenv("OPENROUTER_APP_NAME", "Flood Spaces").strip() or "Flood Spaces"
+    endpoint = (
+        os.getenv("GROQ_API_BASE", "").strip()
+        or "https://api.groq.com/openai/v1/chat/completions"
+    )
     headers = {
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
-        "HTTP-Referer": referer,
-        "X-Title": title,
     }
-    last_error = "openrouter_unavailable"
+    last_error = "groq_unavailable"
+    budget = max(320, int(max_tokens))
+    reasoning_effort = os.getenv("GROQ_REASONING_EFFORT", "low").strip() or "low"
 
-    async with httpx.AsyncClient(timeout=12) as client:
-        for model in dict.fromkeys(models):
-            payload = {
-                "model": model,
-                "messages": messages,
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-            }
-            try:
-                response = await client.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload)
-                response.raise_for_status()
-                data = response.json()
-                text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-                if isinstance(text, str) and text.strip():
-                    return {
-                        "text": text.strip(),
-                        "provider": "openrouter",
-                        "provider_live": True,
-                        "provider_model": model,
-                        "provider_reason": "ok",
-                    }
-                last_error = "empty_openrouter_response"
-            except httpx.HTTPStatusError as exc:
-                status = exc.response.status_code
-                body = exc.response.text.replace("\n", " ").strip()
-                last_error = f"http_{status}:{body[:180]}"
-                if status in (401, 403):
-                    break
-            except Exception as exc:
-                last_error = safe_error_message(exc) or "openrouter_exception"
+    fatal_error = False
+    async with httpx.AsyncClient(timeout=30) as client:
+        for model in groq_model_candidates(profile):
+            if fatal_error:
+                break
+            is_reasoning_model = "gpt-oss" in model.lower()
+            for attempt in range(2):
+                payload: Dict = {
+                    "model": model,
+                    "messages": messages,
+                    "temperature": 0.6 if is_reasoning_model else temperature,
+                    "stream": False,
+                }
+                if is_reasoning_model:
+                    # GPT-OSS on Groq: cap reasoning + give a healthy completion budget
+                    # so the final answer is never starved by reasoning tokens.
+                    payload["reasoning_effort"] = reasoning_effort
+                    payload["max_completion_tokens"] = budget if attempt == 0 else min(4096, budget * 3)
+                else:
+                    payload["max_tokens"] = budget
+
+                try:
+                    response = await client.post(endpoint, headers=headers, json=payload)
+                    response.raise_for_status()
+                    data = response.json()
+                    message = (data.get("choices") or [{}])[0].get("message", {}) or {}
+                    text = message.get("content", "")
+                    if isinstance(text, str) and text.strip():
+                        return {
+                            "text": text.strip(),
+                            "provider": "groq",
+                            "provider_live": True,
+                            "provider_model": model,
+                            "provider_reason": "ok",
+                        }
+                    last_error = "empty_groq_response"
+                except httpx.HTTPStatusError as exc:
+                    status = exc.response.status_code
+                    body = exc.response.text.replace("\n", " ").strip()
+                    last_error = f"http_{status}:{body[:180]}"
+                    # Bad key / forbidden -> no point retrying other models.
+                    if status in (401, 403):
+                        fatal_error = True
+                        break
+                    # Rate limited or model error -> try next model.
+                    if status in (400, 404, 429):
+                        break
+                except Exception as exc:
+                    last_error = safe_error_message(exc) or "groq_exception"
 
     return {
         "text": local_ai_fallback(messages),
@@ -988,6 +1028,10 @@ async def fetch_open_meteo(lat: float, lon: float) -> Dict:
     url = "https://api.open-meteo.com/v1/forecast"
     headers = {"User-Agent": "Flood-Spaces/1.0"}
 
+    if circuit_open("open_meteo"):
+        fallback_fast = await fetch_openweather_forecast_payload(lat, lon)
+        return fallback_fast or build_default_payload()
+
     if openmeteo_client is not None:
         for attempt in range(3):
             for forecast_days in (MONTHLY_FORECAST_DAYS, 16, 7):
@@ -1002,6 +1046,7 @@ async def fetch_open_meteo(lat: float, lon: float) -> Dict:
                         "source": "open-meteo",
                         "forecast_days": len(payload.get("daily", {}).get("time", [])),
                     }
+                    reset_circuit("open_meteo")
                     return payload
                 except Exception:
                     continue
@@ -1028,11 +1073,13 @@ async def fetch_open_meteo(lat: float, lon: float) -> Dict:
                         "source": "open-meteo",
                         "forecast_days": len(payload.get("daily", {}).get("time", [])),
                     }
+                    reset_circuit("open_meteo")
                     return payload
             except Exception:
                 continue
         await asyncio.sleep(0.5 * (attempt + 1))
 
+    trip_circuit("open_meteo")
     fallback = await fetch_openweather_forecast_payload(lat, lon)
     if fallback:
         return fallback
@@ -1057,6 +1104,8 @@ async def fetch_nasa_power_precip(lat: float, lon: float) -> Dict:
     nasa_api_key = os.getenv("NASA_API_KEY", "").strip()
     if nasa_api_key:
         headers["X-Api-Key"] = nasa_api_key
+    if circuit_open("nasa"):
+        return {"value_mm": 0.0, "live": False, "source": "nasa-power", "observed_day": None, "reason": "circuit_open"}
     for attempt in range(3):
         try:
             async with httpx.AsyncClient(timeout=12, headers=headers) as client:
@@ -1084,6 +1133,7 @@ async def fetch_nasa_power_precip(lat: float, lon: float) -> Dict:
 
             trailing = [row[1] for row in valid_rows[-3:]]
             smoothed = sum(trailing) / len(trailing)
+            reset_circuit("nasa")
             return {
                 "value_mm": round(smoothed, 2),
                 "live": True,
@@ -1092,6 +1142,7 @@ async def fetch_nasa_power_precip(lat: float, lon: float) -> Dict:
             }
         except Exception as exc:
             if attempt == 2:
+                trip_circuit("nasa")
                 return {
                     "value_mm": 0.0,
                     "live": False,
@@ -1120,6 +1171,8 @@ async def fetch_open_meteo_river_discharge(lat: float, lon: float) -> Dict:
     }
     url = "https://flood-api.open-meteo.com/v1/flood"
     headers = {"User-Agent": "Flood-Spaces/1.0"}
+    if circuit_open("river"):
+        return {"value_m3s": 0.0, "live": False, "source": "open-meteo-flood", "reason": "circuit_open"}
     for attempt in range(3):
         try:
             async with httpx.AsyncClient(timeout=10, headers=headers) as client:
@@ -1143,6 +1196,7 @@ async def fetch_open_meteo_river_discharge(lat: float, lon: float) -> Dict:
                     "source": "open-meteo-flood",
                     "reason": "null_discharge",
                 }
+            reset_circuit("river")
             return {
                 "value_m3s": float(val),
                 "live": True,
@@ -1150,6 +1204,7 @@ async def fetch_open_meteo_river_discharge(lat: float, lon: float) -> Dict:
             }
         except Exception as exc:
             if attempt == 2:
+                trip_circuit("river")
                 return {
                     "value_m3s": 0.0,
                     "live": False,
@@ -1210,14 +1265,14 @@ async def fetch_openweather_current(lat: float, lon: float) -> Dict:
         }
 
 
-async def check_openrouter_status() -> Dict:
-    result = await openrouter_chat_completion(
+async def check_ai_status() -> Dict:
+    result = await groq_chat_completion(
         [{"role": "user", "content": "Reply only with: OK"}],
         temperature=0.0,
-        max_tokens=8,
+        max_tokens=24,
     )
     return {
-        "configured": bool(os.getenv("OPENROUTER_API_KEY", "").strip()),
+        "configured": bool(os.getenv("GROQ_API_KEY", "").strip()),
         "live": bool(result.get("provider_live", False)),
         "provider": result.get("provider"),
         "model": result.get("provider_model"),
@@ -1682,9 +1737,25 @@ async def summarize_city(city: Dict[str, float]) -> Dict:
     )
 
 
+@app.get("/")
+def root() -> Dict:
+    return {
+        "status": "ok",
+        "project": "Flood Spaces API",
+        "docs": "/docs",
+        "ai": "groq",
+        "bot": "telegram",
+    }
+
+
 @app.get("/api/health")
 def health() -> Dict:
-    return {"status": "ok", "project": "Flood Spaces"}
+    return {
+        "status": "ok",
+        "project": "Flood Spaces",
+        "ai_provider": "groq",
+        "telegram_configured": bool(telegram_token()),
+    }
 
 
 @app.get("/api/upstream-status")
@@ -1701,7 +1772,7 @@ async def upstream_status() -> Dict:
         fetch_open_meteo(sample["lat"], sample["lon"]),
         fetch_nasa_power_precip(sample["lat"], sample["lon"]),
         fetch_open_meteo_river_discharge(sample["lat"], sample["lon"]),
-        check_openrouter_status(),
+        check_ai_status(),
     )
 
     payload_meta = payload.get("_meta", {})
@@ -1727,7 +1798,12 @@ async def upstream_status() -> Dict:
             "value_m3s": river_meta.get("value_m3s", 0.0),
             "reason": river_meta.get("reason"),
         },
-        "openrouter": ai_meta,
+        "ai": ai_meta,
+        "telegram": {
+            "configured": bool(telegram_token()),
+            "webhook_mode": bool(os.getenv("TELEGRAM_WEBHOOK_URL", "").strip()),
+            "subscribers": len(subscriptions),
+        },
         "forecast_pipeline_live": bool(payload_meta.get("live", False)) and bool(river_meta.get("live", False)),
         "core_data_live": bool(payload_meta.get("live", False)) and bool(nasa_meta.get("live", False)) and bool(river_meta.get("live", False)),
     }
@@ -1745,7 +1821,10 @@ async def risk_grid() -> Dict:
         if age < cached.get("ttl", 600):
             return cached["data"]
 
-    summaries = await asyncio.gather(*[summarize_city(city) for city in CITY_SEEDS], return_exceptions=True)
+    summaries = await asyncio.gather(
+        *[asyncio.wait_for(summarize_city(city), timeout=22) for city in CITY_SEEDS],
+        return_exceptions=True,
+    )
     results = []
     for city, summary in zip(CITY_SEEDS, summaries):
         if isinstance(summary, Exception):
@@ -2069,35 +2148,112 @@ async def bd_river_watch() -> Dict:
     return data
 
 
-@app.post("/api/alerts/subscribe")
-async def alerts_subscribe(body: TelegramSubscription) -> Dict:
-    update_or_insert_subscription(body)
+# ---------------------------------------------------------------------------
+# Telegram auto-alert bot
+# ---------------------------------------------------------------------------
+# Anyone who sends /start is subscribed automatically. Location sharing is
+# optional: without it they receive nationwide (Bangladesh) high-risk alerts.
+# ---------------------------------------------------------------------------
 
-    profile = ensure_telegram_profile(body.chat_id)
-    profile["lat"] = body.lat
-    profile["lon"] = body.lon
-    profile["radius_km"] = int(round(body.radius_km))
-    profile["threshold"] = int(body.threshold)
-    profile["alerts_enabled"] = True
-    if not profile.get("selected_region"):
-        profile["selected_region"] = await reverse_geocode_name(body.lat, body.lon)
+TELEGRAM_STORE_VERSION = 2
 
-    greeting = (
-        "Assalamualaikum. Flood Spaces by Tech Father alert subscription is active.\n"
-        f"Area: {profile.get('selected_region') or 'Selected Area'}\n"
-        f"Radius: {profile['radius_km']} km | Threshold: {profile['threshold']}\n"
-        "You can change settings anytime from bot menu."
-    )
-    await send_telegram(
-        body.chat_id,
-        await maybe_translate_for_language(greeting, profile.get("language", "en")),
-        reply_markup=main_menu_keyboard(profile.get("language", "en")),
-    )
-    return {"ok": True, "total_subscriptions": len(subscriptions)}
+GEOLOCATION_PROMPT_EN = (
+    "📍 To get alerts for your exact area, tap **Share my location** below.\n"
+    "You can also type your district name (e.g. Sylhet).\n\n"
+    "No location? No problem — you will still receive nationwide flood alerts."
+)
+GEOLOCATION_PROMPT_BN = (
+    "📍 আপনার এলাকার সঠিক সতর্কতা পেতে নিচের **Share my location** বাটনে চাপ দিন।\n"
+    "অথবা আপনার জেলার নাম লিখুন (যেমন: সিলেট)।\n\n"
+    "লোকেশন না দিলেও আপনি সারা বাংলাদেশের ফ্লাড অ্যালার্ট পাবেন।"
+)
+
+
+def telegram_store_path() -> Path:
+    configured = os.getenv("TELEGRAM_STATE_PATH", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return Path(__file__).resolve().parent.parent / "data" / "telegram_store.json"
+
+
+def load_telegram_state() -> None:
+    path = telegram_store_path()
+    if not path.exists():
+        return
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+
+    if not isinstance(data, dict):
+        return
+
+    profiles = data.get("profiles")
+    if isinstance(profiles, dict):
+        for chat_id, profile in profiles.items():
+            if isinstance(profile, dict):
+                telegram_profiles[str(chat_id)] = {
+                    "chat_id": str(chat_id),
+                    "language": profile.get("language", "en"),
+                    "selected_region": profile.get("selected_region"),
+                    "lat": profile.get("lat"),
+                    "lon": profile.get("lon"),
+                    "radius_km": int(profile.get("radius_km", DEFAULT_TELEGRAM_RADIUS_KM)),
+                    "threshold": int(profile.get("threshold", DEFAULT_TELEGRAM_THRESHOLD)),
+                    "alerts_enabled": bool(profile.get("alerts_enabled", True)),
+                    "pending": profile.get("pending"),
+                    "first_name": profile.get("first_name"),
+                    "username": profile.get("username"),
+                    "last_alert_at": profile.get("last_alert_at"),
+                    "last_alert_area": profile.get("last_alert_area"),
+                    "last_alert_score": profile.get("last_alert_score"),
+                }
+
+    subs = data.get("subscriptions")
+    if isinstance(subs, list):
+        loaded: List[TelegramSubscription] = []
+        for row in subs:
+            try:
+                loaded.append(TelegramSubscription(**row))
+            except Exception:
+                continue
+        subscriptions[:] = loaded
+
+    runtime = data.get("runtime")
+    if isinstance(runtime, dict):
+        telegram_runtime_state["last_update_id"] = int(runtime.get("last_update_id", 0) or 0)
+
+    logger.info("Telegram state loaded: %s profiles, %s subscriptions", len(telegram_profiles), len(subscriptions))
+
+
+def save_telegram_state() -> None:
+    path = telegram_store_path()
+    payload = {
+        "version": TELEGRAM_STORE_VERSION,
+        "profiles": telegram_profiles,
+        "subscriptions": [sub.model_dump() for sub in subscriptions],
+        "runtime": {"last_update_id": int(telegram_runtime_state.get("last_update_id", 0))},
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
+    except Exception as exc:
+        logger.warning("Could not persist telegram state: %s", exc)
 
 
 def telegram_token() -> str:
     return os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+
+
+def configured_telegram_username() -> str:
+    explicit = os.getenv("TELEGRAM_BOT_USERNAME", "").strip().lstrip("@")
+    if explicit:
+        return explicit
+    cached = telegram_runtime_state.get("username")
+    return str(cached).lstrip("@") if cached else ""
 
 
 def chunked(items: List[str], size: int) -> List[List[str]]:
@@ -2125,23 +2281,60 @@ def main_menu_keyboard(language: str) -> Dict:
     return build_reply_keyboard(options, columns=2, one_time=False)
 
 
-def ensure_telegram_profile(chat_id: str) -> Dict:
-    profile = telegram_profiles.get(chat_id)
-    if profile:
-        return profile
-
-    profile = {
-        "chat_id": chat_id,
-        "language": "en",
-        "selected_region": None,
-        "lat": None,
-        "lon": None,
-        "radius_km": DEFAULT_TELEGRAM_RADIUS_KM,
-        "threshold": DEFAULT_TELEGRAM_THRESHOLD,
-        "alerts_enabled": False,
-        "pending": "region",
+def location_keyboard(language: str) -> Dict:
+    label = "📍 Share my location" if language != "bn" else "📍 আমার লোকেশন শেয়ার করুন"
+    skip = "Continue without location" if language != "bn" else "লোকেশন ছাড়া চালিয়ে যান"
+    return {
+        "keyboard": [[{"text": label, "request_location": True}], [{"text": skip}]],
+        "resize_keyboard": True,
+        "one_time_keyboard": True,
     }
-    telegram_profiles[chat_id] = profile
+
+
+def alert_inline_keyboard(language: str) -> Dict:
+    label = "📊 Full risk summary" if language != "bn" else "📊 পূর্ণ ঝুঁকি সারসংক্ষেপ"
+    return {
+        "inline_keyboard": [
+            [
+                {"text": label, "callback_data": "summary"},
+                {
+                    "text": "⚙️ Settings" if language != "bn" else "⚙️ সেটিংস",
+                    "callback_data": "settings",
+                },
+            ]
+        ]
+    }
+
+
+def ensure_telegram_profile(
+    chat_id: str,
+    first_name: str | None = None,
+    username: str | None = None,
+) -> Dict:
+    profile = telegram_profiles.get(chat_id)
+    if not profile:
+        profile = {
+            "chat_id": chat_id,
+            "language": "en",
+            "selected_region": None,
+            "lat": None,
+            "lon": None,
+            "radius_km": DEFAULT_TELEGRAM_RADIUS_KM,
+            "threshold": DEFAULT_TELEGRAM_THRESHOLD,
+            "alerts_enabled": True,
+            "pending": "location",
+            "first_name": first_name,
+            "username": username,
+            "last_alert_at": None,
+            "last_alert_area": None,
+            "last_alert_score": None,
+        }
+        telegram_profiles[chat_id] = profile
+    else:
+        if first_name:
+            profile["first_name"] = first_name
+        if username:
+            profile["username"] = username
     return profile
 
 
@@ -2157,12 +2350,51 @@ def remove_subscription(chat_id: str) -> None:
     subscriptions[:] = [sub for sub in subscriptions if sub.chat_id != chat_id]
 
 
-async def send_telegram(chat_id: str, text: str, reply_markup: Dict | None = None) -> None:
-    token = telegram_token()
-    if not token:
+def ensure_subscription_for_profile(profile: Dict) -> None:
+    if not profile.get("alerts_enabled"):
+        remove_subscription(str(profile["chat_id"]))
         return
 
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    lat = profile.get("lat")
+    lon = profile.get("lon")
+    sub = TelegramSubscription(
+        chat_id=str(profile["chat_id"]),
+        lat=float(lat) if lat is not None else None,
+        lon=float(lon) if lon is not None else None,
+        radius_km=float(profile.get("radius_km") or DEFAULT_TELEGRAM_RADIUS_KM),
+        threshold=int(profile.get("threshold") or DEFAULT_TELEGRAM_THRESHOLD),
+    )
+    update_or_insert_subscription(sub)
+
+
+def sync_subscriptions_from_profiles() -> None:
+    for profile in telegram_profiles.values():
+        if profile.get("alerts_enabled"):
+            ensure_subscription_for_profile(profile)
+        else:
+            remove_subscription(str(profile.get("chat_id")))
+
+
+async def telegram_api(method: str, payload: Dict | None = None, timeout: float = 15) -> Dict:
+    token = telegram_token()
+    if not token:
+        return {"ok": False, "description": "missing_telegram_bot_token"}
+    url = f"https://api.telegram.org/bot{token}/{method}"
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            if payload is None:
+                response = await client.get(url)
+            else:
+                response = await client.post(url, json=payload)
+            return response.json()
+    except Exception as exc:
+        return {"ok": False, "description": safe_error_message(exc)}
+
+
+async def send_telegram(chat_id: str, text: str, reply_markup: Dict | None = None) -> bool:
+    if not telegram_token():
+        return False
+
     formatted_html = markdown_to_telegram_html(text)
     payload: Dict = {
         "chat_id": chat_id,
@@ -2173,18 +2405,19 @@ async def send_telegram(chat_id: str, text: str, reply_markup: Dict | None = Non
     if reply_markup:
         payload["reply_markup"] = reply_markup
 
-    async with httpx.AsyncClient(timeout=12) as client:
-        response = await client.post(url, json=payload)
-        if response.status_code >= 400:
-            # Fallback to plain text if Telegram rejects formatting.
-            fallback = {
-                "chat_id": chat_id,
-                "text": text,
-                "disable_web_page_preview": True,
-            }
-            if reply_markup:
-                fallback["reply_markup"] = reply_markup
-            await client.post(url, json=fallback)
+    result = await telegram_api("sendMessage", payload)
+    if result.get("ok"):
+        return True
+
+    fallback: Dict = {
+        "chat_id": chat_id,
+        "text": text,
+        "disable_web_page_preview": True,
+    }
+    if reply_markup:
+        fallback["reply_markup"] = reply_markup
+    retry = await telegram_api("sendMessage", fallback)
+    return bool(retry.get("ok"))
 
 
 async def maybe_translate_for_language(text: str, language: str) -> str:
@@ -2195,15 +2428,17 @@ async def maybe_translate_for_language(text: str, language: str) -> str:
         "Translate the following text to natural Bengali. "
         "Keep numbers, district names, and units unchanged. Return only Bengali text."
     )
-    translated = await openrouter_chat_completion(
+    translated = await groq_chat_completion(
         [
             {"role": "system", "content": prompt},
             {"role": "user", "content": text},
         ],
         temperature=0.0,
-        max_tokens=min(900, max(180, len(text) * 2)),
+        max_tokens=min(900, max(320, len(text) * 2)),
         profile="fast",
     )
+    if not translated.get("provider_live"):
+        return text
     candidate = str(translated.get("text", "")).strip()
     return candidate or text
 
@@ -2253,30 +2488,37 @@ def bot_help_text(language: str) -> str:
     if language == "bn":
         return (
             "কমান্ডসমূহ:\n"
-            "/start - বট সেটআপ শুরু\n"
-            "/help - সহায়তা\n"
+            "/start - বট সেটআপ ও অটো-অ্যালার্ট চালু\n"
+            "/stop - অ্যালার্ট বন্ধ\n"
             "/summary - নির্বাচিত এলাকার AI সারসংক্ষেপ\n"
             "/settings - বর্তমান সেটিংস\n"
+            "/help - সহায়তা\n\n"
             "আপনি যেকোনো সাধারণ প্রশ্নও করতে পারেন (যেমন: Rangpur temperature)."
         )
     return (
         "Commands:\n"
-        "/start - Start bot setup\n"
-        "/help - Help\n"
-        "/summary - AI summary for selected area\n"
+        "/start - Start setup and enable auto-alerts\n"
+        "/stop - Pause alerts\n"
+        "/summary - AI summary for your area\n"
         "/settings - Current settings\n"
+        "/help - Help\n\n"
         "You can also ask any general question (example: temperature of Rangpur)."
     )
 
 
 def profile_settings_text(profile: Dict) -> str:
-    area = profile.get("selected_region") or "Not selected"
+    area = profile.get("selected_region") or "Nationwide (Bangladesh)"
+    scope = (
+        f"{area}"
+        if profile.get("lat") is not None
+        else f"{area} — share your location for local alerts"
+    )
     return (
-        f"Region: {area}\n"
+        f"Region: {scope}\n"
         f"Language: {'Bengali' if profile.get('language') == 'bn' else 'English'}\n"
-        f"Alerts: {'ON' if profile.get('alerts_enabled') else 'OFF'}\n"
+        f"Alerts: {'ON — automatic' if profile.get('alerts_enabled') else 'OFF'}\n"
         f"Radius: {profile.get('radius_km', DEFAULT_TELEGRAM_RADIUS_KM)} km\n"
-        f"Threshold: {profile.get('threshold', DEFAULT_TELEGRAM_THRESHOLD)}"
+        f"Threshold: {profile.get('threshold', DEFAULT_TELEGRAM_THRESHOLD)}/100"
     )
 
 
@@ -2285,7 +2527,11 @@ async def send_ai_summary_for_profile(chat_id: str, profile: Dict) -> None:
     lon = profile.get("lon")
     area = profile.get("selected_region")
     if lat is None or lon is None or not area:
-        base_text = "Please select your region first." if profile.get("language") != "bn" else "দয়া করে আগে আপনার এলাকা নির্বাচন করুন।"
+        base_text = (
+            "Please share your location or pick a district first."
+            if profile.get("language") != "bn"
+            else "দয়া করে আগে লোকেশন শেয়ার করুন অথবা জেলা নির্বাচন করুন।"
+        )
         await send_telegram(chat_id, base_text, reply_markup=main_menu_keyboard(profile.get("language", "en")))
         return
 
@@ -2345,13 +2591,13 @@ async def answer_general_bot_chat(chat_id: str, profile: Dict, user_text: str) -
     if web_context:
         system_prompt += f" Web snapshot (may be partial): {web_context}."
 
-    ai_result = await openrouter_chat_completion(
+    ai_result = await groq_chat_completion(
         [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_text},
         ],
         temperature=0.2,
-        max_tokens=180,
+        max_tokens=220,
         profile="fast",
     )
     text = str(ai_result.get("text", "No reply returned."))
@@ -2359,23 +2605,111 @@ async def answer_general_bot_chat(chat_id: str, profile: Dict, user_text: str) -
     await send_telegram(chat_id, text, reply_markup=main_menu_keyboard(profile.get("language", "en")))
 
 
-async def handle_telegram_message(chat_id: str, text: str) -> None:
+def welcome_text(language: str) -> str:
+    if language == "bn":
+        return (
+            "🌊 **Flood Spaces-এ স্বাগতম**\n\n"
+            "✅ আপনার জন্য **স্বয়ংক্রিয় ফ্লাড অ্যালার্ট চালু** হয়েছে — "
+            "উচ্চ ঝুঁকি শনাক্ত হলে আমি নিজেই আপনাকে মেসেজ দেব।\n\n"
+            + GEOLOCATION_PROMPT_BN
+        )
+    return (
+        "🌊 **Welcome to Flood Spaces**\n\n"
+        "✅ **Automatic flood alerts are ON** for this account — "
+        "when a high-risk zone is detected, I will message you automatically.\n\n"
+        + GEOLOCATION_PROMPT_EN
+    )
+
+
+async def enable_alerts_for_profile(profile: Dict) -> None:
+    profile["alerts_enabled"] = True
+    ensure_subscription_for_profile(profile)
+    save_telegram_state()
+
+
+async def apply_location_to_profile(
+    chat_id: str,
+    profile: Dict,
+    lat: float,
+    lon: float,
+) -> None:
+    language = profile.get("language", "en")
+    profile["lat"] = float(lat)
+    profile["lon"] = float(lon)
+    profile["pending"] = None
+    profile["alerts_enabled"] = True
+    profile["radius_km"] = int(profile.get("radius_km") or DEFAULT_TELEGRAM_RADIUS_KM)
+    profile["threshold"] = int(profile.get("threshold") or DEFAULT_TELEGRAM_THRESHOLD)
+    region = await reverse_geocode_name(lat, lon)
+    profile["selected_region"] = region
+    ensure_subscription_for_profile(profile)
+    save_telegram_state()
+
+    if language == "bn":
+        text = (
+            f"📍 এলাকা সেট হয়েছে: **{region}**\n"
+            f"✅ অটো-অ্যালার্ট চালু | ব্যাসার্ধ {profile['radius_km']} km | থ্রেশহোল্ড {profile['threshold']}/100\n\n"
+            "এখন থেকে ঝুঁকি বাড়লেই আমি নিজে আপনাকে সতর্ক করব।"
+        )
+    else:
+        text = (
+            f"📍 Area set: **{region}**\n"
+            f"✅ Auto-alerts ON | Radius {profile['radius_km']} km | Threshold {profile['threshold']}/100\n\n"
+            "From now on I will warn you automatically whenever risk rises."
+        )
+    await send_telegram(chat_id, text, reply_markup=main_menu_keyboard(language))
+
+
+async def handle_telegram_location(
+    chat_id: str,
+    profile: Dict,
+    latitude: float,
+    longitude: float,
+) -> None:
+    await apply_location_to_profile(chat_id, profile, latitude, longitude)
+
+
+async def handle_telegram_message(
+    chat_id: str,
+    text: str,
+    location: Dict | None = None,
+    first_name: str | None = None,
+    username: str | None = None,
+) -> None:
+    profile = ensure_telegram_profile(chat_id, first_name=first_name, username=username)
+
+    if location and isinstance(location, dict):
+        lat = location.get("latitude")
+        lon = location.get("longitude")
+        if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
+            await handle_telegram_location(chat_id, profile, float(lat), float(lon))
+            return
+
     raw_text = text.strip()
     if not raw_text:
         return
 
-    profile = ensure_telegram_profile(chat_id)
     lang = profile.get("language", "en")
     lower = raw_text.lower()
 
     if lower.startswith("/start"):
-        profile["pending"] = "region"
-        welcome = (
-            "Welcome to Flood Spaces Bot. Please select your district first."
+        profile["alerts_enabled"] = True
+        profile["pending"] = "location"
+        ensure_subscription_for_profile(profile)
+        save_telegram_state()
+        await send_telegram(chat_id, welcome_text(lang), reply_markup=location_keyboard(lang))
+        return
+
+    if lower.startswith("/stop") or raw_text in {"Turn Off Alerts", "অ্যালার্ট বন্ধ করুন"}:
+        profile["alerts_enabled"] = False
+        remove_subscription(chat_id)
+        save_telegram_state()
+        msg = (
+            "🔕 Alerts paused. Send /start anytime to turn them back on."
             if lang != "bn"
-            else "Flood Spaces বটে স্বাগতম। আগে আপনার জেলা নির্বাচন করুন।"
+            else "🔕 অ্যালার্ট বন্ধ করা হয়েছে। আবার চালু করতে /start পাঠান।"
         )
-        await send_telegram(chat_id, welcome, reply_markup=districts_keyboard())
+        await send_telegram(chat_id, msg, reply_markup=main_menu_keyboard(lang))
         return
 
     if lower.startswith("/help") or raw_text in {"Help", "সহায়তা"}:
@@ -2385,6 +2719,19 @@ async def handle_telegram_message(chat_id: str, text: str) -> None:
     if lower.startswith("/settings") or raw_text in {"My Settings", "আমার সেটিংস"}:
         settings_text = await maybe_translate_for_language(profile_settings_text(profile), lang)
         await send_telegram(chat_id, settings_text, reply_markup=main_menu_keyboard(lang))
+        return
+
+    if raw_text in {"Continue without location", "লোকেশন ছাড়া চালিয়ে যান", "Skip"}:
+        profile["pending"] = None
+        profile["alerts_enabled"] = True
+        ensure_subscription_for_profile(profile)
+        save_telegram_state()
+        msg = (
+            "✅ Nationwide Bangladesh alerts are ON. Share your location anytime with /start for local alerts."
+            if lang != "bn"
+            else "✅ সারা বাংলাদেশের অ্যালার্ট চালু আছে। লোকাল অ্যালার্ট পেতে যেকোনো সময় /start দিয়ে লোকেশন শেয়ার করুন।"
+        )
+        await send_telegram(chat_id, msg, reply_markup=main_menu_keyboard(lang))
         return
 
     if raw_text in BANGLADESH_DISTRICTS:
@@ -2399,15 +2746,23 @@ async def handle_telegram_message(chat_id: str, text: str) -> None:
         profile["selected_region"] = region_name
         profile["lat"] = lat
         profile["lon"] = lon
-        profile["pending"] = "language"
-        msg = "Region saved. Now choose your language." if lang != "bn" else "এলাকা সংরক্ষণ হয়েছে। এখন ভাষা নির্বাচন করুন।"
-        await send_telegram(chat_id, msg, reply_markup=language_keyboard())
+        profile["pending"] = None
+        profile["alerts_enabled"] = True
+        ensure_subscription_for_profile(profile)
+        save_telegram_state()
+        msg = (
+            f"✅ Region saved: {region_name}. Auto-alerts are ON — "
+            f"you will be notified automatically when risk crosses {profile['threshold']}/100."
+        )
+        msg = await maybe_translate_for_language(msg, lang)
+        await send_telegram(chat_id, msg, reply_markup=main_menu_keyboard(lang))
         return
 
     if raw_text in {"English", "বাংলা", "Bangla", "Bengali"}:
         profile["language"] = "bn" if raw_text != "English" else "en"
         profile["pending"] = None
         lang = profile["language"]
+        save_telegram_state()
         msg = "Language set. Use the menu below." if lang != "bn" else "ভাষা সেট হয়েছে। নিচের মেনু ব্যবহার করুন।"
         await send_telegram(chat_id, msg, reply_markup=main_menu_keyboard(lang))
         return
@@ -2420,24 +2775,26 @@ async def handle_telegram_message(chat_id: str, text: str) -> None:
 
     if raw_text in {"Set Radius", "রেডিয়াস সেট করুন"}:
         profile["pending"] = "radius"
-        prompt = "Send radius in km (10-200)." if lang != "bn" else "রেডিয়াস কিমি-তে দিন (10-200)।"
+        prompt = "Send radius in km (10-500)." if lang != "bn" else "রেডিয়াস কিমি-তে দিন (10-500)।"
         await send_telegram(chat_id, prompt, reply_markup=main_menu_keyboard(lang))
         return
 
     if raw_text in {"Set Threshold", "থ্রেশহোল্ড সেট করুন"}:
         profile["pending"] = "threshold"
-        prompt = "Send threshold value (30-100)." if lang != "bn" else "থ্রেশহোল্ড দিন (30-100)।"
+        prompt = "Send threshold value (20-100)." if lang != "bn" else "থ্রেশহোল্ড দিন (20-100)।"
         await send_telegram(chat_id, prompt, reply_markup=main_menu_keyboard(lang))
         return
 
     if profile.get("pending") == "radius":
         value = parse_number(raw_text)
-        if value is None or value < 10 or value > 200:
-            prompt = "Invalid radius. Enter a number from 10 to 200." if lang != "bn" else "ভুল রেডিয়াস। 10 থেকে 200 এর মধ্যে সংখ্যা দিন।"
+        if value is None or value < 10 or value > 500:
+            prompt = "Invalid radius. Enter a number from 10 to 500." if lang != "bn" else "ভুল রেডিয়াস। 10 থেকে 500 এর মধ্যে সংখ্যা দিন।"
             await send_telegram(chat_id, prompt, reply_markup=main_menu_keyboard(lang))
             return
         profile["radius_km"] = int(round(value))
         profile["pending"] = None
+        ensure_subscription_for_profile(profile)
+        save_telegram_state()
         done = f"Radius updated to {profile['radius_km']} km."
         done = await maybe_translate_for_language(done, lang)
         await send_telegram(chat_id, done, reply_markup=main_menu_keyboard(lang))
@@ -2445,12 +2802,14 @@ async def handle_telegram_message(chat_id: str, text: str) -> None:
 
     if profile.get("pending") == "threshold":
         value = parse_number(raw_text)
-        if value is None or value < 30 or value > 100:
-            prompt = "Invalid threshold. Enter a number from 30 to 100." if lang != "bn" else "ভুল থ্রেশহোল্ড। 30 থেকে 100 এর মধ্যে সংখ্যা দিন।"
+        if value is None or value < 20 or value > 100:
+            prompt = "Invalid threshold. Enter a number from 20 to 100." if lang != "bn" else "ভুল থ্রেশহোল্ড। 20 থেকে 100 এর মধ্যে সংখ্যা দিন।"
             await send_telegram(chat_id, prompt, reply_markup=main_menu_keyboard(lang))
             return
         profile["threshold"] = int(round(value))
         profile["pending"] = None
+        ensure_subscription_for_profile(profile)
+        save_telegram_state()
         done = f"Threshold updated to {profile['threshold']}."
         done = await maybe_translate_for_language(done, lang)
         await send_telegram(chat_id, done, reply_markup=main_menu_keyboard(lang))
@@ -2461,30 +2820,21 @@ async def handle_telegram_message(chat_id: str, text: str) -> None:
         return
 
     if lower.startswith("/alerts_on") or raw_text in {"Turn On Alerts", "অ্যালার্ট চালু করুন"}:
-        if profile.get("lat") is None or profile.get("lon") is None:
-            msg = "Select your region first to enable alerts." if lang != "bn" else "অ্যালার্ট চালু করতে আগে এলাকা নির্বাচন করুন।"
-            await send_telegram(chat_id, msg, reply_markup=districts_keyboard())
-            return
-
-        sub = TelegramSubscription(
-            chat_id=chat_id,
-            lat=float(profile["lat"]),
-            lon=float(profile["lon"]),
-            radius_km=float(profile.get("radius_km", DEFAULT_TELEGRAM_RADIUS_KM)),
-            threshold=int(profile.get("threshold", DEFAULT_TELEGRAM_THRESHOLD)),
-        )
-        update_or_insert_subscription(sub)
         profile["alerts_enabled"] = True
+        ensure_subscription_for_profile(profile)
+        save_telegram_state()
         msg = (
-            f"Alerts enabled for {profile.get('selected_region')}. Radius {profile['radius_km']} km, threshold {profile['threshold']}."
+            "✅ Automatic alerts are ON for this account."
+            if lang != "bn"
+            else "✅ এই অ্যাকাউন্টে স্বয়ংক্রিয় অ্যালার্ট চালু হয়েছে।"
         )
-        msg = await maybe_translate_for_language(msg, lang)
         await send_telegram(chat_id, msg, reply_markup=main_menu_keyboard(lang))
         return
 
-    if lower.startswith("/alerts_off") or raw_text in {"Turn Off Alerts", "অ্যালার্ট বন্ধ করুন"}:
-        remove_subscription(chat_id)
+    if lower.startswith("/alerts_off"):
         profile["alerts_enabled"] = False
+        remove_subscription(chat_id)
+        save_telegram_state()
         msg = "Alerts turned off." if lang != "bn" else "অ্যালার্ট বন্ধ করা হয়েছে।"
         await send_telegram(chat_id, msg, reply_markup=main_menu_keyboard(lang))
         return
@@ -2498,40 +2848,85 @@ async def handle_telegram_message(chat_id: str, text: str) -> None:
 
 
 async def configure_telegram_commands() -> None:
-    token = telegram_token()
-    if not token:
+    if not telegram_token():
         return
 
-    url = f"https://api.telegram.org/bot{token}/setMyCommands"
     commands = [
-        {"command": "start", "description": "Start onboarding"},
+        {"command": "start", "description": "Start + enable automatic alerts"},
         {"command": "help", "description": "Show help"},
         {"command": "settings", "description": "Show current settings"},
         {"command": "summary", "description": "AI summary for selected area"},
-        {"command": "alerts_on", "description": "Turn alerts on"},
-        {"command": "alerts_off", "description": "Turn alerts off"},
+        {"command": "stop", "description": "Pause automatic alerts"},
     ]
-    async with httpx.AsyncClient(timeout=10) as client:
-        await client.post(url, json={"commands": commands})
+    await telegram_api("setMyCommands", {"commands": commands})
+
+    me = await telegram_api("getMe")
+    if me.get("ok"):
+        telegram_runtime_state["username"] = str(me.get("result", {}).get("username", ""))
+
+
+async def set_telegram_webhook() -> Dict:
+    webhook_url = os.getenv("TELEGRAM_WEBHOOK_URL", "").strip().rstrip("/")
+    if not telegram_token() or not webhook_url:
+        return {"ok": False, "reason": "missing_telegram_token_or_webhook_url"}
+
+    secret = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
+    payload: Dict = {
+        "url": f"{webhook_url}/api/telegram/webhook",
+        "allowed_updates": ["message", "edited_message", "callback_query"],
+        "drop_pending_updates": False,
+    }
+    if secret:
+        payload["secret_token"] = secret
+
+    result = await telegram_api("setWebhook", payload)
+    if result.get("ok"):
+        telegram_runtime_state["webhook"] = True
+    return result
+
+
+async def remove_telegram_webhook() -> Dict:
+    result = await telegram_api("deleteWebhook", {"drop_pending_updates": False})
+    if result.get("ok"):
+        telegram_runtime_state["webhook"] = False
+    return result
+
+
+async def handle_telegram_callback(callback: Dict) -> None:
+    data = str(callback.get("data", "")).strip()
+    message = callback.get("message") if isinstance(callback.get("message"), dict) else {}
+    chat = message.get("chat", {}) if isinstance(message.get("chat"), dict) else {}
+    chat_id = str(chat.get("id", "")).strip()
+    if chat_id:
+        profile = ensure_telegram_profile(chat_id)
+        if data == "summary":
+            await send_ai_summary_for_profile(chat_id, profile)
+        elif data == "settings":
+            await send_telegram(
+                chat_id,
+                profile_settings_text(profile),
+                reply_markup=main_menu_keyboard(profile.get("language", "en")),
+            )
+    await telegram_api("answerCallbackQuery", {"callback_query_id": callback.get("id", "")})
 
 
 async def process_telegram_updates() -> None:
-    token = telegram_token()
-    if not token:
+    if not telegram_token():
         return
+    if os.getenv("TELEGRAM_WEBHOOK_URL", "").strip():
+        return  # webhook handles delivery in this mode
 
     offset = int(telegram_runtime_state.get("last_update_id", 0)) + 1
-    url = f"https://api.telegram.org/bot{token}/getUpdates"
-    params = {"offset": offset, "limit": 50, "timeout": 0}
-
-    try:
-        async with httpx.AsyncClient(timeout=12) as client:
-            response = await client.get(url, params=params)
-            response.raise_for_status()
-            payload = response.json()
-    except Exception:
-        return
-
+    payload = await telegram_api(
+        "getUpdates",
+        {
+            "offset": offset,
+            "limit": 50,
+            "timeout": 0,
+            "allowed_updates": ["message", "edited_message", "callback_query"],
+        },
+        timeout=20,
+    )
     if not payload.get("ok"):
         return
 
@@ -2540,6 +2935,11 @@ async def process_telegram_updates() -> None:
         if update_id > int(telegram_runtime_state.get("last_update_id", 0)):
             telegram_runtime_state["last_update_id"] = update_id
 
+        callback = update.get("callback_query")
+        if isinstance(callback, dict):
+            await handle_telegram_callback(callback)
+            continue
+
         message = update.get("message") or update.get("edited_message")
         if not isinstance(message, dict):
             continue
@@ -2547,43 +2947,157 @@ async def process_telegram_updates() -> None:
         chat = message.get("chat", {}) if isinstance(message.get("chat"), dict) else {}
         chat_id = str(chat.get("id", "")).strip()
         text = str(message.get("text", "")).strip()
-        if not chat_id or not text:
+        location = message.get("location") if isinstance(message.get("location"), dict) else None
+        if not chat_id or (not text and not location):
             continue
 
-        await handle_telegram_message(chat_id, text)
+        first_name = str(chat.get("first_name", "") or "").strip() or None
+        username = str(chat.get("username", "") or "").strip() or None
+        await handle_telegram_message(chat_id, text, location=location, first_name=first_name, username=username)
+
+    save_telegram_state()
+
+
+def _coerce_float(value) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 async def process_alert_checks() -> Dict:
+    """Automatic alert sweep across every Telegram account that started the bot."""
+    sync_subscriptions_from_profiles()
     if not subscriptions:
-        return {"ok": True, "alerts_sent": 0}
+        return {"ok": True, "alerts_sent": 0, "evaluated": 0, "skipped": 0}
 
     grid = await risk_grid()
-    sent = 0
-    for sub in subscriptions:
-        near_points = []
-        for point in grid["items"]:
-            distance = haversine_km(sub.lat, sub.lon, point["lat"], point["lon"])
-            if distance <= sub.radius_km:
-                near_points.append((distance, point))
+    items = grid.get("items", [])
+    if not items:
+        return {"ok": True, "alerts_sent": 0, "evaluated": len(subscriptions), "skipped": 0}
 
-        if not near_points:
+    cooldown_minutes = int(os.getenv("ALERT_COOLDOWN_MINUTES", "60") or 60)
+    now = datetime.now(timezone.utc)
+    sent = 0
+    skipped = 0
+
+    for sub in list(subscriptions):
+        profile = ensure_telegram_profile(sub.chat_id)
+        if not profile.get("alerts_enabled"):
             continue
 
-        top = sorted(near_points, key=lambda x: x[1]["risk_score"], reverse=True)[0]
-        point = top[1]
-        if point["risk_score"] >= sub.threshold:
-            message = (
-                f"Flood Alert: {point['name']} risk is {point['risk_level'].upper()} ({point['risk_score']}/100).\n"
-                f"Rain 24h: {point['rainfall_24h_mm']} mm | Wind: {point['wind_kmh']} km/h\n"
-                f"Distance from your location: {round(top[0], 1)} km"
-            )
-            profile = telegram_profiles.get(sub.chat_id, {})
-            language = profile.get("language", "en") if isinstance(profile, dict) else "en"
-            message = await maybe_translate_for_language(message, language)
-            await send_telegram(sub.chat_id, message, reply_markup=main_menu_keyboard(language))
-            sent += 1
+        lat = _coerce_float(sub.lat if sub.lat is not None else profile.get("lat"))
+        lon = _coerce_float(sub.lon if sub.lon is not None else profile.get("lon"))
+        radius = float(sub.radius_km or profile.get("radius_km") or DEFAULT_TELEGRAM_RADIUS_KM)
+        threshold = int(sub.threshold or profile.get("threshold") or DEFAULT_TELEGRAM_THRESHOLD)
 
-    return {"ok": True, "alerts_sent": sent}
+        candidates: List[Tuple[float, Dict]] = []
+        for point in items:
+            point_lat = _coerce_float(point.get("lat"))
+            point_lon = _coerce_float(point.get("lon"))
+            if point_lat is None or point_lon is None:
+                continue
+            distance = haversine_km(lat, lon, point_lat, point_lon) if lat is not None and lon is not None else 0.0
+            if lat is None or lon is None or distance <= radius:
+                candidates.append((distance, point))
+
+        if not candidates:
+            skipped += 1
+            continue
+
+        distance, point = max(candidates, key=lambda row: float(row[1].get("risk_score", 0.0)))
+        score = float(point.get("risk_score", 0.0))
+        if score < threshold:
+            skipped += 1
+            continue
+
+        area_name = str(point.get("name", "Unknown area"))
+        last_at_raw = profile.get("last_alert_at")
+        last_score = _coerce_float(profile.get("last_alert_score")) or 0.0
+        last_area = str(profile.get("last_alert_area") or "")
+        if last_at_raw:
+            try:
+                last_at = datetime.fromisoformat(str(last_at_raw).replace("Z", "+00:00"))
+                if last_at.tzinfo is None:
+                    last_at = last_at.replace(tzinfo=timezone.utc)
+                within_cooldown = (now - last_at).total_seconds() < cooldown_minutes * 60
+                not_worse = score <= last_score + 5 and area_name == last_area
+                if within_cooldown and not_worse:
+                    skipped += 1
+                    continue
+            except Exception:
+                pass
+
+        language = profile.get("language", "en")
+        level = str(point.get("risk_level", "high")).upper()
+        scope = (
+            f"{round(distance, 1)} km from your area"
+            if lat is not None and lon is not None
+            else "nationwide Bangladesh watch"
+        )
+        message = (
+            f"🚨 **FLOOD ALERT — {level}**\n"
+            f"**{area_name}** is at {score}/100 risk.\n"
+            f"Rain 24h: {point.get('rainfall_24h_mm', 0)} mm | Wind: {point.get('wind_kmh', 0)} km/h\n"
+            f"River discharge: {point.get('river_discharge_m3s', 0)} m³/s\n"
+            f"Confidence: {point.get('confidence_pct', 0)}% · Scope: {scope}\n\n"
+            "Stay alert. Move documents, drinking water and power banks to higher ground."
+        )
+        if language == "bn":
+            message = (
+                f"🚨 **বন্যা সতর্কতা — {level}**\n"
+                f"**{area_name}** এলাকায় ঝুঁকি {score}/100।\n"
+                f"২৪ ঘণ্টার বৃষ্টি: {point.get('rainfall_24h_mm', 0)} মিমি | বাতাস: {point.get('wind_kmh', 0)} কিমি/ঘণ্টা\n"
+                f"নদীর প্রবাহ: {point.get('river_discharge_m3s', 0)} m³/s\n\n"
+                "নিরাপদ জায়গায় নথি, খাবার ও পাওয়ার ব্যাংক রাখুন।"
+            )
+
+        delivered = await send_telegram(sub.chat_id, message, reply_markup=alert_inline_keyboard(language))
+        if delivered:
+            sent += 1
+            profile["last_alert_at"] = now.isoformat()
+            profile["last_alert_area"] = area_name
+            profile["last_alert_score"] = score
+        else:
+            skipped += 1
+
+    save_telegram_state()
+    return {
+        "ok": True,
+        "alerts_sent": sent,
+        "evaluated": len(subscriptions),
+        "skipped": skipped,
+        "checked_at": now.isoformat(),
+    }
+
+
+@app.post("/api/alerts/subscribe")
+async def alerts_subscribe(body: TelegramSubscription) -> Dict:
+    profile = ensure_telegram_profile(body.chat_id)
+    profile["lat"] = body.lat
+    profile["lon"] = body.lon
+    profile["radius_km"] = int(round(body.radius_km))
+    profile["threshold"] = int(body.threshold)
+    profile["alerts_enabled"] = True
+    if body.lat is not None and body.lon is not None and not profile.get("selected_region"):
+        profile["selected_region"] = await reverse_geocode_name(body.lat, body.lon)
+    ensure_subscription_for_profile(profile)
+    save_telegram_state()
+
+    greeting = (
+        "Assalamualaikum. Flood Spaces auto-alerts are active.\n"
+        f"Area: {profile.get('selected_region') or 'Nationwide Bangladesh'}\n"
+        f"Radius: {profile['radius_km']} km | Threshold: {profile['threshold']}/100\n"
+        "You will now be alerted automatically."
+    )
+    await send_telegram(
+        body.chat_id,
+        await maybe_translate_for_language(greeting, profile.get("language", "en")),
+        reply_markup=main_menu_keyboard(profile.get("language", "en")),
+    )
+    return {"ok": True, "total_subscriptions": len(subscriptions)}
 
 
 @app.post("/api/alerts/check")
@@ -2591,14 +3105,102 @@ async def alerts_check() -> Dict:
     return await process_alert_checks()
 
 
+@app.get("/api/cron/alerts")
+async def cron_alerts(request: Request) -> Dict:
+    """Cron-friendly endpoint for Vercel Cron / external schedulers."""
+    secret = os.getenv("CRON_SECRET", "").strip()
+    if secret:
+        auth = request.headers.get("authorization", "")
+        if auth != f"Bearer {secret}" and request.query_params.get("secret") != secret:
+            raise HTTPException(status_code=401, detail="Invalid cron secret")
+    return await process_alert_checks()
+
+
+@app.get("/api/telegram/bot-info")
+async def telegram_bot_info() -> Dict:
+    token = telegram_token()
+    info: Dict = {
+        "configured": bool(token),
+        "username": configured_telegram_username(),
+        "webhook_mode": bool(os.getenv("TELEGRAM_WEBHOOK_URL", "").strip()),
+        "subscribers": len(subscriptions),
+        "profiles": len(telegram_profiles),
+        "ai_provider": "groq",
+        "ai_model": os.getenv("GROQ_MODEL", "").strip() or "openai/gpt-oss-20b",
+    }
+    if token and not info["username"]:
+        me = await telegram_api("getMe")
+        if me.get("ok"):
+            info["username"] = str(me.get("result", {}).get("username", ""))
+            telegram_runtime_state["username"] = info["username"]
+    return info
+
+
+@app.post("/api/telegram/setup-webhook")
+async def telegram_setup_webhook() -> Dict:
+    return await set_telegram_webhook()
+
+
+@app.post("/api/telegram/webhook")
+async def telegram_webhook(update: Dict, request: Request) -> Dict:
+    token = telegram_token()
+    if not token:
+        return {"ok": False, "reason": "no_bot_token"}
+
+    expected_secret = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
+    if expected_secret:
+        received = request.headers.get("x-telegram-bot-api-secret-token", "")
+        if received != expected_secret:
+            raise HTTPException(status_code=401, detail="Invalid Telegram webhook secret")
+
+    message = update.get("message") or update.get("edited_message")
+    if isinstance(message, dict):
+        chat = message.get("chat", {}) if isinstance(message.get("chat"), dict) else {}
+        chat_id = str(chat.get("id", "")).strip()
+        text = str(message.get("text", "")).strip()
+        location = message.get("location") if isinstance(message.get("location"), dict) else None
+        if chat_id and (text or location):
+            first_name = str(chat.get("first_name", "") or "").strip() or None
+            username = str(chat.get("username", "") or "").strip() or None
+            await handle_telegram_message(chat_id, text, location=location, first_name=first_name, username=username)
+            save_telegram_state()
+
+    callback = update.get("callback_query")
+    if isinstance(callback, dict):
+        await handle_telegram_callback(callback)
+
+    return {"ok": True}
+
+
 @app.on_event("startup")
 async def startup_event() -> None:
-    # Background checks keep alerts automatic without manual trigger.
+    # Load persisted bot subscribers so alerts survive restarts / redeploys.
+    load_telegram_state()
+    sync_subscriptions_from_profiles()
+
     has_telegram = bool(telegram_token())
+    webhook_mode = bool(os.getenv("TELEGRAM_WEBHOOK_URL", "").strip())
+
+    if has_telegram:
+        await configure_telegram_commands()
+        if webhook_mode:
+            result = await set_telegram_webhook()
+            logger.info("Telegram webhook mode: %s", result.get("ok"))
+        else:
+            # Polling fallback for local dev / long-running hosts.
+            await remove_telegram_webhook()
 
     if not scheduler.running:
-        scheduler.add_job(process_alert_checks, "interval", minutes=5, id="alert-checks", replace_existing=True)
-        if has_telegram:
+        scheduler.add_job(
+            process_alert_checks,
+            "interval",
+            minutes=int(os.getenv("ALERT_CHECK_INTERVAL_MINUTES", "5") or 5),
+            id="alert-checks",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+        if has_telegram and not webhook_mode:
             scheduler.add_job(
                 process_telegram_updates,
                 "interval",
@@ -2610,12 +3212,10 @@ async def startup_event() -> None:
             )
         scheduler.start()
 
-    if has_telegram:
-        await configure_telegram_commands()
-
 
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
+    save_telegram_state()
     if scheduler.running:
         scheduler.shutdown(wait=False)
 
@@ -2647,7 +3247,7 @@ async def ai_summary(body: AIRequest) -> Dict:
         "## Risk Assessment, ## Data Confidence, ## Immediate Action, ## Safety Level. "
         "Use concise bullets and bold key alerts."
     )
-    summary = await openrouter_chat_completion(
+    summary = await groq_chat_completion(
         [{"role": "user", "content": prompt}],
         max_tokens=520,
         temperature=0.25,
@@ -2730,7 +3330,7 @@ async def ai_chat(body: AIChatRequest) -> Dict:
         if web_context:
             system_prompt += f" Web snapshot (may be partial): {web_context}."
 
-    reply = await openrouter_chat_completion(
+    reply = await groq_chat_completion(
         [{"role": "system", "content": system_prompt}, *user_messages],
         temperature=0.2,
         max_tokens=220,

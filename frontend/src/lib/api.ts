@@ -2,6 +2,7 @@ import type {
   AIChatMessage,
   AIChatResponse,
   AISummaryResponse,
+  BotInfo,
   BoundaryResponse,
   GeocodeResult,
   GlobalFloodEventsResponse,
@@ -10,6 +11,8 @@ import type {
   RiskPoint,
   UpstreamStatus
 } from "../types";
+
+const REQUEST_TIMEOUT_MS = 60000;
 
 function splitConfiguredBases(value: string): string[] {
   return value
@@ -25,51 +28,39 @@ function normalizeBase(base: string): string {
   return base.replace(/\/+$/, "");
 }
 
-function codespacesPortOrigins(origin: string): string[] {
-  const match = origin.match(/^(https?:\/\/[^-]+-)(\d+)(\.app\.github\.dev)$/);
-  if (!match) {
-    return [];
-  }
-  const [, prefix, , suffix] = match;
-  return [8004, 8003, 8000].map((port) => `${prefix}${port}${suffix}`);
-}
-
 const configuredBases = splitConfiguredBases(import.meta.env.VITE_API_BASE_URL || "");
 const browserOrigin = typeof window !== "undefined" ? window.location.origin : "";
 
-const API_BASES = Array.from(
-  new Set(
-    [
-      ...configuredBases,
-      "",
-      browserOrigin,
-      ...codespacesPortOrigins(browserOrigin),
-      "http://localhost:8004",
-      "http://localhost:8003",
-      "http://localhost:8000"
-    ]
-      .map(normalizeBase)
-      .filter((v) => v !== "undefined")
-  )
-) as string[];
+// If a backend URL is configured we use it exclusively. Otherwise stay same-origin:
+// Vite proxies /api in development and Vercel can rewrite in production.
+const API_BASES = (
+  configuredBases.length ? configuredBases : [browserOrigin ? "" : "http://127.0.0.1:8004"]
+)
+  .map(normalizeBase)
+  .filter((v) => v !== "undefined");
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const errors: string[] = [];
+
   for (const base of API_BASES) {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try {
-      const target = `${base}${path}`;
-      const response = await fetch(target, init);
+      const response = await fetch(`${base}${path}`, { ...init, signal: init?.signal ?? controller.signal });
       if (!response.ok) {
-        errors.push(`${base}: ${response.status}`);
+        errors.push(`${base || "same-origin"}: HTTP ${response.status}`);
         continue;
       }
-      return response.json();
+      return (await response.json()) as T;
     } catch (error) {
-      errors.push(`${base}: ${(error as Error).message}`);
+      const message = error instanceof Error ? error.message : String(error);
+      errors.push(`${base || "same-origin"}: ${message}`);
+    } finally {
+      window.clearTimeout(timer);
     }
   }
 
-  throw new Error(errors.length ? `Failed to fetch data (${errors.join("; ")})` : "Failed to fetch data");
+  throw new Error(errors.length ? `Backend unreachable (${errors.join("; ")})` : "Backend unreachable");
 }
 
 export async function fetchRiskGrid(): Promise<RiskGridResponse> {
@@ -78,12 +69,12 @@ export async function fetchRiskGrid(): Promise<RiskGridResponse> {
 
 export async function subscribeTelegram(input: {
   chat_id: string;
-  lat: number;
-  lon: number;
+  lat?: number;
+  lon?: number;
   threshold: number;
   radius_km: number;
-}): Promise<{ ok: boolean }> {
-  return requestJson<{ ok: boolean }>("/api/alerts/subscribe", {
+}): Promise<{ ok: boolean; total_subscriptions?: number }> {
+  return requestJson<{ ok: boolean; total_subscriptions?: number }>("/api/alerts/subscribe", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input)
@@ -163,4 +154,8 @@ export async function fetchGlobalFloodEvents(): Promise<GlobalFloodEventsRespons
 
 export async function fetchBdRiverWatch(): Promise<RiverWatchResponse> {
   return requestJson<RiverWatchResponse>("/api/bd-river-watch");
+}
+
+export async function fetchBotInfo(): Promise<BotInfo> {
+  return requestJson<BotInfo>("/api/telegram/bot-info");
 }

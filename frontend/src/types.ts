@@ -53,6 +53,14 @@ export type RiskGridSourceSummary = {
   temperature_live_pct: number;
 };
 
+export type AIProviderStatus = {
+  configured: boolean;
+  live: boolean;
+  provider?: string | null;
+  model?: string | null;
+  reason?: string | null;
+};
+
 export type UpstreamStatus = {
   sample_area: string;
   timestamp: string;
@@ -74,15 +82,24 @@ export type UpstreamStatus = {
     value_m3s: number;
     reason?: string | null;
   };
-  openrouter: {
+  ai: AIProviderStatus;
+  telegram?: {
     configured: boolean;
-    live: boolean;
-    provider?: string | null;
-    model?: string | null;
-    reason?: string | null;
+    webhook_mode: boolean;
+    subscribers: number;
   };
   forecast_pipeline_live: boolean;
   core_data_live: boolean;
+};
+
+export type BotInfo = {
+  configured: boolean;
+  username: string;
+  webhook_mode: boolean;
+  subscribers: number;
+  profiles: number;
+  ai_provider: string;
+  ai_model: string;
 };
 
 export type AIProviderResponse = {

@@ -1,0 +1,37 @@
+# Render blueprint — gives the FastAPI backend a real always-on process so the
+# 5-minute alert scheduler and Telegram polling keep running 24/7.
+services:
+  - type: web
+    name: flood-spaces-api
+    runtime: python
+    plan: starter # free plan sleeps after inactivity and breaks 24/7 alerts
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    autoDeploy: true
+    disk:
+      name: flood-spaces-data
+      mountPath: /opt/render/project/src/backend/data
+      sizeGB: 1
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.2
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: openai/gpt-oss-20b
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_BOT_USERNAME
+        sync: false
+      - key: TELEGRAM_STATE_PATH
+        value: /opt/render/project/src/backend/data/telegram_store.json
+      - key: ALERT_CHECK_INTERVAL_MINUTES
+        value: "5"
+      - key: ALERT_DEFAULT_THRESHOLD
+        value: "50"
+      - key: ALERT_RADIUS_KM
+        value: "100"
+      - key: FRONTEND_ORIGIN
+        sync: false

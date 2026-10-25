@@ -24,13 +24,14 @@ services:
     runtime: python
     plan: free
     rootDir: backend
+    # Python version comes from .python-version at the repo root (3.13).
+    # Do NOT pin an exact old patch via PYTHON_VERSION (e.g. 3.11.2): modern
+    # Render builders no longer provision it and the build dies in python-env.sh.
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /api/health
     autoDeploy: true
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.11.2
       - key: GROQ_API_KEY
         sync: false
       - key: GROQ_MODEL

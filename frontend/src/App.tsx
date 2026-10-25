@@ -203,7 +203,13 @@ export default function App() {
   const [chatInput, setChatInput] = useState("");
   const [chatBusy, setChatBusy] = useState(false);
 
-  const [chatId, setChatId] = useState(() => localStorage.getItem("fs.telegramChatId") || "");
+  const [chatId, setChatId] = useState(() => {
+    try {
+      return localStorage.getItem("fs.telegramChatId") || "";
+    } catch {
+      return "";
+    }
+  });
   const [threshold, setThreshold] = useState(55);
   const [radiusKm, setRadiusKm] = useState(100);
   const [alertStatus, setAlertStatus] = useState("");
@@ -299,7 +305,11 @@ export default function App() {
   const telegramLink = telegramUsername ? `https://t.me/${telegramUsername}` : "";
 
   useEffect(() => {
-    localStorage.setItem("fs.telegramChatId", chatId);
+    try {
+      localStorage.setItem("fs.telegramChatId", chatId);
+    } catch {
+      /* storage can be blocked in private mode */
+    }
   }, [chatId]);
 
   useEffect(() => {
@@ -867,7 +877,11 @@ export default function App() {
                       </div>
                       <div className="mini-stat">
                         <span>Temperature</span>
-                        <strong>{selected.temperature_c !== null ? `${selected.temperature_c}°C` : "n/a"}</strong>
+                        <strong>
+                          {selected.temperature_c !== null && selected.temperature_c !== undefined
+                            ? `${selected.temperature_c}°C`
+                            : "n/a"}
+                        </strong>
                       </div>
                       <div className="mini-stat">
                         <span>Signal</span>

@@ -158,6 +158,13 @@ https://<your-service>.onrender.com/api/telegram/bot-info
 
 `bot-info` should return `"configured": true` and the resolved `username`.
 
+> **Build error `python-env.sh: line 38: …/Python-3.11.2/bin/python3.11: No such file or directory`?**
+> The old blueprint pinned `PYTHON_VERSION=3.11.2`. Render only provisions a fixed set of Python
+> builds, and that old patch is no longer among them, so the interpreter path never exists.
+> The blueprint no longer sets `PYTHON_VERSION`; a `.python-version` file at the repo root asks for
+> **3.13** (latest patch), and every dependency has manylinux wheels for it. If you prefer the env
+> var, use a fully-qualified recent patch such as `3.13.5`.
+
 > Run a **single** uvicorn worker (the default). Multiple workers would each poll Telegram
 > and duplicate alerts. If you scale out, switch to webhook mode and move state to a shared store.
 

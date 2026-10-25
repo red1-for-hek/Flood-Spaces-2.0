@@ -10,6 +10,63 @@
 
 **Vercel cannot host this backend for 24/7 alerts.** Serverless functions are killed after each request, so the APScheduler job that sweeps risk every 5 minutes never runs, and the JSON subscriber store is wiped. Keep Vercel for the frontend and move the API to a long-running host.
 
+
+---
+
+## 0) “Can I just keep the backend on Vercel?”
+
+Short answer: **you can host the API there, but Vercel cannot deliver 24/7 alerts by itself.**
+
+Why:
+
+| Requirement | Vercel serverless | Long-running host |
+| --- | --- | --- |
+| 5-minute alert scheduler (APScheduler) | ❌ function dies after the request | ✅ stays alive |
+| Telegram long-polling (`getUpdates`) | ❌ no background loop | ✅ |
+| Subscriber persistence on disk | ❌ read-only FS (only `/tmp`, wiped on cold start) | ✅ disk/volume |
+| Response time after idle | 🐢 cold start (3–10 s) for a 16-city forecast sweep | ⚡ warm |
+
+### Temporary setup that *does* work on Vercel
+
+If your backend is already deployed there, you can run in **webhook mode** and let an external
+cron do the alert sweep:
+
+1. Set these env vars on Vercel and redeploy:
+
+```env
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_WEBHOOK_URL=https://<your-vercel-app>.vercel.app
+TELEGRAM_WEBHOOK_SECRET=<random-string>
+TELEGRAM_STATE_PATH=/tmp/telegram_store.json
+CRON_SECRET=<random-string>
+GROQ_API_KEY=...
+```
+
+2. Register the webhook (once):
+
+```bash
+curl -X POST https://<your-vercel-app>.vercel.app/api/telegram/setup-webhook
+```
+
+3. Add an external scheduler (cron-job.org, UptimeRobot, GitHub Actions) hitting this URL
+   **every 5 minutes**:
+
+```
+GET https://<your-vercel-app>.vercel.app/api/cron/alerts?secret=<CRON_SECRET>
+```
+
+4. Press Start in the bot and confirm with **Send test alert** in the dashboard.
+
+### What still breaks on Vercel
+
+- **Subscribers vanish on cold start** because `/tmp` is per-instance. Users must re-press Start.
+- **Alerts fire only when the cron hits** the function, and each hit pays a cold start.
+- Free-plan function limits (invocations/duration) can throttle a 16-city forecast sweep.
+
+So: keep Vercel for the **frontend**, move the backend to Render/Railway/Fly when you need
+reliable alerting. `/api/cron/alerts` exists precisely so a temporary Vercel deployment can
+still push alerts until you migrate.
+
 ---
 
 ## 1) Prepare the repository

@@ -146,6 +146,10 @@ VITE_MAP_TILES=https://tile.openstreetmap.org/{z}/{x}/{y}.png
 | Frontend | **Vercel** | Static Vite build, free, global CDN (config included in `frontend/vercel.json`) |
 | Backend + bot scheduler | **Render / Railway / Fly.io** | Long-running process needed for 24/7 alerts |
 
+> **Already on Vercel?** You can keep the API there in webhook mode with an external 5-minute
+> cron hitting `/api/cron/alerts`, but subscribers are lost on cold starts. See
+> [DEPLOYMENT.md → “Can I just keep the backend on Vercel?”](DEPLOYMENT.md#0-can-i-just-keep-the-backend-on-vercel).
+
 ### Render (recommended, ~5 minutes)
 
 1. Push this repo to GitHub.

@@ -184,13 +184,34 @@ Full walkthrough: [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ---
 
+## 🩺 Troubleshooting
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| Intro shows, then a blank page | WebGL blocked (sandboxed iframe, disabled GPU acceleration) — MapLibre used to throw and unmount React | Fixed: the map now detects WebGL2 and renders a *zone list* fallback; an error boundary + crash overlay keep the rest of the dashboard alive |
+| "Map view unavailable" panel | Same WebGL limitation | Enable hardware acceleration / open outside the embedded frame, or keep using the zone list |
+| Everything shows `n/a` / 0 mm | Backend can't reach Open-Meteo / NASA from its host | Check `/api/upstream-status`; the banner tells you when feeds are degraded |
+| "Live backend unreachable" | `VITE_API_BASE_URL` missing or wrong | Set it to your Render URL and redeploy the frontend |
+| Bot never replies | `TELEGRAM_BOT_TOKEN` missing | `/api/telegram/bot-info` shows `configured: false` until it is set |
+| Preview/dev server dies after a while | Sandbox restarts (not an app bug) | Restart `npm run dev` + `uvicorn`; production hosts are unaffected |
+
+Run all checks:
+
+```bash
+cd frontend
+npm run typecheck && npm run smoke:all
+```
+
 ## 🧪 Tests
 
 ```bash
 cd frontend
 npm run typecheck   # strict TS
 npm run build       # production bundle
-npm run smoke       # jsdom render test: mounts the whole app with mocked APIs
+npm run smoke        # renders the app tree with mocked APIs
+npm run smoke:nowebgl# same, with WebGL blocked (map fallback path)
+npm run smoke:entry  # boots the real src/main.tsx (StrictMode + boundaries)
+npm run smoke:all    # all three
 ```
 
 ## 🧪 Model philosophy

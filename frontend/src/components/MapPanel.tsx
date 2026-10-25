@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import maplibregl, { Map } from "maplibre-gl";
 import type { GlobalFloodEvent, RiskPoint } from "../types";
+import { supportsWebgl2 } from "../lib/webgl";
 
 type MapMode = "risk" | "rain" | "wind";
 
@@ -415,6 +416,7 @@ export default function MapPanel({
 }: Props) {
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const [tileWarning, setTileWarning] = useState<string>("");
+  const [mapError, setMapError] = useState<string>("");
   const mapRef = useRef<Map | null>(null);
   const lastFocusNonce = useRef<number>(0);
   const onSelectRef = useRef(onSelect);
@@ -464,6 +466,15 @@ export default function MapPanel({
       layers: [{ id: "basemap", type: "raster", source: "basemap", paint: { "raster-opacity": 0.92 } }]
     } as never;
   }, []);
+
+  const topZones = useMemo(
+    () =>
+      [...points]
+        .filter((point) => !point.is_no_data)
+        .sort((a, b) => b.risk_score - a.risk_score)
+        .slice(0, 8),
+    [points]
+  );
 
   const countryVisibleNames = useMemo(
     () =>
@@ -660,18 +671,34 @@ export default function MapPanel({
       return;
     }
 
-    const map = new maplibregl.Map({
-      container: mapContainerRef.current,
-      style: baseStyle as never,
-      center: [90.3563, 23.685],
-      zoom: 6.25,
-      minZoom: 1,
-      maxZoom: 18
-    });
+    // MapLibre throws when WebGL2 is unavailable (locked-down browser, blocklisted
+    // GPU, some sandboxed iframes). Never let that unmount the dashboard.
+    if (!supportsWebgl2()) {
+      setMapError("3D map rendering is disabled in this browser (WebGL unavailable).");
+      return;
+    }
 
-    map.addControl(new maplibregl.NavigationControl({ showCompass: true }), "top-right");
-    map.addControl(new maplibregl.ScaleControl({ unit: "metric" }), "bottom-right");
-    map.addControl(new maplibregl.AttributionControl({ compact: true }), "bottom-right");
+    let map: Map;
+    try {
+      map = new maplibregl.Map({
+        container: mapContainerRef.current,
+        style: baseStyle as never,
+        center: [90.3563, 23.685],
+        zoom: 6.25,
+        minZoom: 1,
+        maxZoom: 18,
+        attributionControl: false
+      });
+
+      map.addControl(new maplibregl.NavigationControl({ showCompass: true }), "top-right");
+      map.addControl(new maplibregl.ScaleControl({ unit: "metric" }), "bottom-right");
+      map.addControl(new maplibregl.AttributionControl({ compact: true }), "bottom-right");
+    } catch (error) {
+      console.error("[Flood Spaces] Map initialisation failed:", error);
+      setMapError(error instanceof Error ? error.message : "Map could not start.");
+      return;
+    }
+
     mapRef.current = map;
 
     // Resilient basemap: if the primary tile provider is blocked or asks for a key,
@@ -702,6 +729,7 @@ export default function MapPanel({
     });
 
     map.on("load", () => {
+      try {
       const empty = emptyFeatureCollection();
       map.addSource("country-boundary", { type: "geojson", data: empty as never });
       map.addSource("district-boundaries", { type: "geojson", data: empty as never });
@@ -1129,10 +1157,18 @@ export default function MapPanel({
         }
         onMapClickRef.current(event.lngLat.lat, event.lngLat.lng);
       });
+      } catch (error) {
+        console.error("[Flood Spaces] Map layer setup failed:", error);
+        setMapError(error instanceof Error ? error.message : "Map layers could not be created.");
+      }
     });
 
     return () => {
-      map.remove();
+      try {
+        map.remove();
+      } catch {
+        /* already torn down */
+      }
       mapRef.current = null;
     };
   }, [baseStyle]);
@@ -1204,6 +1240,33 @@ export default function MapPanel({
     upazilaBoundaries,
     upazilaRenderData
   ]);
+
+  if (mapError) {
+    return (
+      <div className="map-shell map-fallback">
+        <div className="map-fallback-inner">
+          <strong>Map view unavailable</strong>
+          <p>{mapError}</p>
+          <ul>
+            {topZones.map((zone) => (
+              <li key={`${zone.name}-${zone.lat}`}>
+                <button onClick={() => onSelectRef.current(zone)}>
+                  <span>{zone.name}</span>
+                  <em className={`risk-chip-${zone.risk_level}`}>
+                    {Math.round(zone.risk_score)}/100 · {zone.risk_level}
+                  </em>
+                </button>
+              </li>
+            ))}
+          </ul>
+          <p className="map-fallback-hint">
+            Every number below is still live — only the interactive map layer needs WebGL. Enable hardware
+            acceleration (or open the site outside an embedded frame) to restore it.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="map-shell">

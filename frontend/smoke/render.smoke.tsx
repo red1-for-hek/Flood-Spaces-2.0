@@ -27,6 +27,19 @@ class ResizeObserverStub {
 (globalThis as Record<string, unknown>).ResizeObserver = ResizeObserverStub;
 (win as unknown as Record<string, unknown>).ResizeObserver = ResizeObserverStub;
 
+// SMOKE_NO_WEBGL=1 simulates browsers/iframes where WebGL is blocked, which
+// previously made MapLibre throw and unmount the whole dashboard.
+const noWebgl = process.env.NO_WEBGL === "1";
+if (noWebgl) {
+  win.HTMLCanvasElement.prototype.getContext = (() => null) as never;
+} else {
+  // Pretend WebGL2 exists so the map init path runs (the real renderer is stubbed).
+  win.HTMLCanvasElement.prototype.getContext = ((type: string) =>
+    type === "webgl2"
+      ? ({ getExtension: () => ({ loseContext: () => {} }) } as unknown)
+      : null) as never;
+}
+
 const fixtures: Record<string, unknown> = {
   "/api/risk-grid": {
     country_focus: "Bangladesh forecast focus",
@@ -205,6 +218,14 @@ async function main() {
 
   const html = win.document.body.innerHTML;
   const checks: Array<[string, boolean]> = [
+    ...(noWebgl
+      ? ([
+          ["webgl fallback shown", html.includes("Map view unavailable")],
+          ["fallback lists zones", html.includes("map-fallback-inner")],
+          ["dashboard still alive", html.includes("National risk index") && html.includes("Telegram flood bot")],
+          ["no crash overlay", !html.includes("Runtime error")]
+        ] as Array<[string, boolean]>)
+      : []),
     ["shell rendered", html.includes("app-shell")],
     ["title", html.includes("Flood command center")],
     ["KPI strip", html.includes("National risk index")],

@@ -43,6 +43,7 @@ import {
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import MapPanel from "./components/MapPanel";
+import ErrorBoundary from "./components/ErrorBoundary";
 import RiskGauge from "./components/RiskGauge";
 import LoadingScreen from "./components/LoadingScreen";
 import {
@@ -885,22 +886,29 @@ export default function App() {
                   <div className="spinner" /> Loading risk surface…
                 </div>
               ) : null}
-              <MapPanel
-                points={points}
-                densePoints={densePoints}
-                riverWatchPoints={riverWatchPoints}
-                onSelect={setSelected}
-                onMapClick={handleMapClick}
-                selectedName={selected?.name || null}
-                highlightPoint={selected ? { lat: selected.lat, lon: selected.lon, name: selected.name } : null}
-                focusPoint={focusPoint}
-                highlightAccuracyMeters={locationAccuracyMeters}
-                mode={mapMode}
-                globalFloodEvents={globalFloodEvents}
-                countryBoundary={countryBoundary}
-                districtBoundaries={districtBoundaries}
-                upazilaBoundaries={upazilaBoundaries}
-              />
+              <ErrorBoundary
+                compact
+                title="Map failed to render"
+                description="The risk data below is unaffected."
+                onReset={() => window.location.reload()}
+              >
+                <MapPanel
+                  points={points}
+                  densePoints={densePoints}
+                  riverWatchPoints={riverWatchPoints}
+                  onSelect={setSelected}
+                  onMapClick={handleMapClick}
+                  selectedName={selected?.name || null}
+                  highlightPoint={selected ? { lat: selected.lat, lon: selected.lon, name: selected.name } : null}
+                  focusPoint={focusPoint}
+                  highlightAccuracyMeters={locationAccuracyMeters}
+                  mode={mapMode}
+                  globalFloodEvents={globalFloodEvents}
+                  countryBoundary={countryBoundary}
+                  districtBoundaries={districtBoundaries}
+                  upazilaBoundaries={upazilaBoundaries}
+                />
+              </ErrorBoundary>
               {mapMode === "risk" ? (
                 <div className="map-legend">
                   <span><i className="dot low" /> Normal</span>

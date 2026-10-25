@@ -8,7 +8,10 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "smoke": "esbuild smoke/render.smoke.tsx --bundle --platform=node --format=cjs --target=node20 --outfile=node_modules/.cache/smoke.cjs --external:jsdom --alias:maplibre-gl=./smoke/maplibre-stub.ts --loader:.css=empty --log-level=error --define:import.meta.env='{\"DEV\":true,\"PROD\":false,\"MODE\":\"development\",\"VITE_API_BASE_URL\":\"\",\"VITE_TELEGRAM_BOT_USERNAME\":\"\",\"VITE_MAP_TILES\":\"\"}' && node node_modules/.cache/smoke.cjs"
+    "smoke": "esbuild smoke/render.smoke.tsx --bundle --platform=node --format=cjs --target=node20 --external:jsdom --alias:maplibre-gl=./smoke/maplibre-stub --loader:.css=empty --log-level=error --define:import.meta.env='{\"DEV\":true,\"PROD\":false,\"MODE\":\"development\",\"VITE_API_BASE_URL\":\"\",\"VITE_TELEGRAM_BOT_USERNAME\":\"\",\"VITE_MAP_TILES\":\"\"}' --outfile=node_modules/.cache/smoke.cjs && node node_modules/.cache/smoke.cjs",
+    "smoke:nowebgl": "esbuild smoke/render.smoke.tsx --bundle --platform=node --format=cjs --target=node20 --external:jsdom --alias:maplibre-gl=./smoke/maplibre-stub --loader:.css=empty --log-level=error --define:import.meta.env='{\"DEV\":true,\"PROD\":false,\"MODE\":\"development\",\"VITE_API_BASE_URL\":\"\",\"VITE_TELEGRAM_BOT_USERNAME\":\"\",\"VITE_MAP_TILES\":\"\"}' --outfile=node_modules/.cache/smoke.cjs && NO_WEBGL=1 node node_modules/.cache/smoke.cjs",
+    "smoke:entry": "esbuild smoke/entry.smoke.tsx --bundle --platform=node --format=cjs --target=node20 --external:jsdom --alias:maplibre-gl=./smoke/maplibre-stub --loader:.css=empty --log-level=error --define:import.meta.env='{\"DEV\":true,\"PROD\":false,\"MODE\":\"development\",\"VITE_API_BASE_URL\":\"\",\"VITE_TELEGRAM_BOT_USERNAME\":\"\",\"VITE_MAP_TILES\":\"\"}' --outfile=node_modules/.cache/entry.cjs && node node_modules/.cache/entry.cjs",
+    "smoke:all": "npm run smoke && npm run smoke:nowebgl && npm run smoke:entry"
   },
   "dependencies": {
     "clsx": "^2.1.1",

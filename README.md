@@ -111,6 +111,12 @@ The flow is intentionally zero-friction:
 
 Bot commands: `/start`, `/stop`, `/help`, `/settings`, `/summary`.
 
+Verify delivery any time with **Send test alert** in the dashboard, or:
+
+```bash
+curl -X POST "https://your-api.onrender.com/api/alerts/test?chat_id=123456789"
+```
+
 Manual linking is still possible from the dashboard via **Link a chat ID manually** (uses `/api/alerts/subscribe`).
 
 ### Persistence
@@ -165,6 +171,7 @@ Full walkthrough: [DEPLOYMENT.md](DEPLOYMENT.md).
 | `POST` | `/api/ai/summary` | Groq area briefing |
 | `POST` | `/api/ai/chat` | Groq general chat |
 | `POST` | `/api/alerts/subscribe` | Link a Telegram chat manually |
+| `POST` | `/api/alerts/test` | Send a one-off test alert (optional `?chat_id=`) |
 | `GET` | `/api/cron/alerts` | Cron-friendly alert sweep |
 | `GET` | `/api/telegram/bot-info` | Bot status for the dashboard |
 | `POST` | `/api/telegram/webhook` | Telegram webhook |

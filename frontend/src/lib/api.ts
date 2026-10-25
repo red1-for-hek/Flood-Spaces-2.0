@@ -81,6 +81,14 @@ export async function subscribeTelegram(input: {
   });
 }
 
+export async function sendTestAlert(chatId?: string): Promise<{ ok: boolean; sent: number; requested?: number; reason?: string }> {
+  const query = chatId && chatId.trim() ? `?chat_id=${encodeURIComponent(chatId.trim())}` : "";
+  return requestJson<{ ok: boolean; sent: number; requested?: number; reason?: string }>(
+    `/api/alerts/test${query}`,
+    { method: "POST" }
+  );
+}
+
 export async function runAlertCheck(): Promise<{ ok: boolean; alerts_sent: number }> {
   return requestJson<{ ok: boolean; alerts_sent: number }>("/api/alerts/check", { method: "POST" });
 }

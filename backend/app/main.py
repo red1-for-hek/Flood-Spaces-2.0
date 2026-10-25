@@ -3117,6 +3117,37 @@ async def alerts_check() -> Dict:
     return await process_alert_checks()
 
 
+@app.post("/api/alerts/test")
+async def alerts_test(chat_id: str | None = None) -> Dict:
+    """Send a one-off test alert so delivery can be verified instantly."""
+    targets = [chat_id.strip()] if chat_id and chat_id.strip() else [sub.chat_id for sub in subscriptions]
+    if not targets:
+        return {
+            "ok": False,
+            "sent": 0,
+            "reason": "no_subscribers",
+            "hint": "Open the bot and press Start, or pass ?chat_id=...",
+        }
+
+    delivered = 0
+    for target in dict.fromkeys(targets):
+        profile = ensure_telegram_profile(target)
+        language = profile.get("language", "en")
+        text = (
+            "🔔 **Test alert from Flood Spaces**\n\n"
+            "Delivery works. You will receive automatic flood alerts for "
+            f"{profile.get('selected_region') or 'nationwide Bangladesh'} "
+            f"(threshold {profile.get('threshold', DEFAULT_TELEGRAM_THRESHOLD)}/100)."
+            if language != "bn"
+            else "🔔 **Flood Spaces টেস্ট অ্যালার্ট**\n\n"
+            "ডেলিভারি ঠিক আছে। আপনি স্বয়ংক্রিয় বন্যা সতর্কতা পাবেন।"
+        )
+        if await send_telegram(target, text, reply_markup=alert_inline_keyboard(language)):
+            delivered += 1
+
+    return {"ok": delivered > 0, "sent": delivered, "requested": len(targets)}
+
+
 @app.get("/api/cron/alerts")
 async def cron_alerts(request: Request) -> Dict:
     """Cron-friendly endpoint for Vercel Cron / external schedulers."""

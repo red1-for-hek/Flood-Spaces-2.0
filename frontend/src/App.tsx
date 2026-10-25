@@ -57,6 +57,7 @@ import {
   fetchRiskGrid,
   fetchUpstreamStatus,
   geocodePlace,
+  sendTestAlert,
   subscribeTelegram
 } from "./lib/api";
 import type { BotInfo, GeocodeResult, GlobalFloodEvent, RiskPoint, UpstreamStatus } from "./types";
@@ -213,6 +214,7 @@ export default function App() {
   const [threshold, setThreshold] = useState(55);
   const [radiusKm, setRadiusKm] = useState(100);
   const [alertStatus, setAlertStatus] = useState("");
+  const [testingAlert, setTestingAlert] = useState(false);
   const [showAdvancedAlerts, setShowAdvancedAlerts] = useState(false);
 
   const chatEndRef = useRef<HTMLDivElement | null>(null);
@@ -545,6 +547,26 @@ export default function App() {
     }
   }
 
+  async function handleTestAlert() {
+    if (testingAlert) return;
+    setTestingAlert(true);
+    setAlertStatus("Sending test alert…");
+    try {
+      const result = await sendTestAlert(chatId);
+      if (result.ok) {
+        setAlertStatus(`Test alert delivered to ${result.sent} chat${result.sent === 1 ? "" : "s"}.`);
+      } else if (result.reason === "no_subscribers") {
+        setAlertStatus("No subscribers yet — press Start in the bot, or add a chat ID below.");
+      } else {
+        setAlertStatus("Test alert could not be delivered. Check the bot token on the backend.");
+      }
+    } catch (err) {
+      setAlertStatus((err as Error).message);
+    } finally {
+      setTestingAlert(false);
+    }
+  }
+
   async function handleSubscribe() {
     if (!chatId.trim()) {
       setAlertStatus("Enter your Telegram chat ID, or simply press Start in the bot.");
@@ -838,14 +860,22 @@ export default function App() {
                 districtBoundaries={districtBoundaries}
                 upazilaBoundaries={upazilaBoundaries}
               />
-              <div className="map-legend">
-                <span><i className="dot low" /> Normal</span>
-                <span><i className="dot moderate" /> Moderate</span>
-                <span><i className="dot high" /> High</span>
-                <span><i className="dot severe" /> Severe</span>
-                <span><i className="dot active-flood" /> Active flood</span>
-                <span><i className="dot river-watch" /> River watch</span>
-              </div>
+              {mapMode === "risk" ? (
+                <div className="map-legend">
+                  <span><i className="dot low" /> Normal</span>
+                  <span><i className="dot moderate" /> Moderate</span>
+                  <span><i className="dot high" /> High</span>
+                  <span><i className="dot severe" /> Severe</span>
+                  <span><i className="dot active-flood" /> Active flood</span>
+                  <span><i className="dot river-watch" /> River watch</span>
+                </div>
+              ) : (
+                <div className="map-legend">
+                  <span>{mapMode === "rain" ? "24h rain" : "Wind"}</span>
+                  <span className="gradient-legend" aria-hidden="true" />
+                  <span>{mapMode === "rain" ? "0 mm → 120+ mm" : "0 → 80+ km/h"}</span>
+                </div>
+              )}
               <div className="map-hint">Click anywhere to inspect a location · scroll to zoom</div>
             </div>
           </div>
@@ -949,6 +979,17 @@ export default function App() {
                   <AlertTriangle size={15} /> Set <code>TELEGRAM_BOT_TOKEN</code> on the backend to activate the bot.
                 </div>
               )}
+
+              <div className="telegram-actions">
+                <button className="ghost-btn" onClick={handleTestAlert} disabled={testingAlert}>
+                  <Zap size={15} /> {testingAlert ? "Sending…" : "Send test alert"}
+                </button>
+                {botInfo?.configured ? (
+                  <span className="source-line inline">Bot token detected</span>
+                ) : (
+                  <span className="source-line inline">Bot token missing</span>
+                )}
+              </div>
 
               <button className="link-btn" onClick={() => setShowAdvancedAlerts((prev) => !prev)}>
                 {showAdvancedAlerts ? "Hide manual linking" : "Link a chat ID manually"}

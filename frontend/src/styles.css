@@ -2386,3 +2386,31 @@ input[type="range"]::-moz-range-thumb {
     backdrop-filter: none;
   }
 }
+
+.telegram-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 12px 0 2px;
+  flex-wrap: wrap;
+}
+
+.telegram-actions .ghost-btn {
+  height: 34px;
+  font-size: 11.5px;
+}
+
+.source-line.inline {
+  margin-top: 0;
+  font-size: 10px;
+}
+
+.gradient-legend {
+  display: inline-block;
+  width: 82px;
+  height: 6px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgb(46, 194, 126), rgb(254, 138, 46));
+  box-shadow: 0 0 0 1px rgba(148, 163, 184, 0.2) inset;
+}

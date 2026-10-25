@@ -126,11 +126,13 @@ The backend registers `POST /api/telegram/webhook` with Telegram automatically a
 curl https://<your-service>.onrender.com/api/telegram/bot-info
 ```
 
-4. Force an immediate sweep:
+4. Send a test alert straight to that chat:
 
 ```bash
-curl https://<your-service>.onrender.com/api/alerts/check -X POST
+curl -X POST "https://<your-service>.onrender.com/api/alerts/test?chat_id=<chat_id>"
 ```
+
+Or press **Send test alert** in the dashboard's Telegram card (it broadcasts to all subscribers).
 
 Alerts respect the subscriber's radius and threshold, plus a 60-minute cooldown (`ALERT_COOLDOWN_MINUTES`) and only re-notify early when risk escalates.
 

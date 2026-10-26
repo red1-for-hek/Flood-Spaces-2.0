@@ -1,16 +1,17 @@
 @import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&family=Noto+Sans+Bengali:wght@400;500;600&display=swap");
 
 :root {
-  --bg: #050a12;
-  --bg-soft: #08111d;
-  --panel: rgba(13, 22, 36, 0.78);
-  --panel-solid: #0c1626;
-  --panel-raised: rgba(20, 32, 50, 0.62);
-  --border: rgba(148, 163, 184, 0.12);
-  --border-strong: rgba(148, 163, 184, 0.22);
-  --text: #e9eff8;
-  --text-dim: #c3cedd;
-  --muted: #8595ab;
+  /* Premium near-black shell with reserved cyan/mint glow */
+  --bg: #02040a;
+  --bg-soft: #05090f;
+  --panel: rgba(9, 15, 25, 0.82);
+  --panel-solid: #070d16;
+  --panel-raised: rgba(16, 25, 39, 0.66);
+  --border: rgba(148, 163, 184, 0.11);
+  --border-strong: rgba(148, 163, 184, 0.24);
+  --text: #edf3fb;
+  --text-dim: #c2cddc;
+  --muted: #7d8ea6;
   --accent: #22d3ee;
   --accent-soft: rgba(34, 211, 238, 0.12);
   --mint: #34d399;
@@ -19,7 +20,38 @@
   --radius-lg: 22px;
   --radius-md: 16px;
   --radius-sm: 11px;
-  --shadow-panel: 0 24px 60px -32px rgba(0, 0, 0, 0.9), 0 1px 0 rgba(255, 255, 255, 0.04) inset;
+  --shadow-panel: 0 30px 70px -40px rgba(0, 0, 0, 0.95), 0 1px 0 rgba(255, 255, 255, 0.04) inset;
+  --shell-glow-a: rgba(34, 211, 238, 0.16);
+  --shell-glow-b: rgba(52, 211, 153, 0.11);
+  --shell-glow-c: rgba(99, 102, 241, 0.14);
+  --shell-base: linear-gradient(168deg, #02040a 0%, #030812 46%, #010307 100%);
+  --surface-veil: rgba(6, 11, 19, 0.72);
+  --well: rgba(2, 5, 10, 0.62);
+}
+
+html[data-theme="light"] {
+  --bg: #eef3fa;
+  --bg-soft: #f6f9fd;
+  --panel: rgba(255, 255, 255, 0.86);
+  --panel-solid: #ffffff;
+  --panel-raised: rgba(255, 255, 255, 0.9);
+  --border: rgba(15, 23, 42, 0.1);
+  --border-strong: rgba(15, 23, 42, 0.2);
+  --text: #0b1524;
+  --text-dim: #2c3a4d;
+  --muted: #5a6b82;
+  --accent: #0891b2;
+  --accent-soft: rgba(8, 145, 178, 0.1);
+  --mint: #059669;
+  --danger: #dc2626;
+  --amber: #b45309;
+  --shadow-panel: 0 26px 60px -40px rgba(15, 23, 42, 0.34), 0 1px 0 rgba(255, 255, 255, 0.9) inset;
+  --shell-glow-a: rgba(14, 165, 233, 0.16);
+  --shell-glow-b: rgba(16, 185, 129, 0.14);
+  --shell-glow-c: rgba(129, 140, 248, 0.16);
+  --shell-base: linear-gradient(168deg, #f7fafe 0%, #eef4fb 52%, #e8eff8 100%);
+  --surface-veil: rgba(255, 255, 255, 0.82);
+  --well: rgba(226, 234, 245, 0.7);
 }
 
 * {
@@ -99,9 +131,39 @@ a {
   min-height: 100vh;
   display: flex;
   background:
-    radial-gradient(1100px 620px at 78% -10%, rgba(34, 211, 238, 0.1), transparent 62%),
-    radial-gradient(900px 520px at 2% 18%, rgba(52, 211, 153, 0.07), transparent 58%),
-    linear-gradient(160deg, #050a12 0%, #060d18 48%, #04080f 100%);
+    radial-gradient(1200px 680px at 82% -12%, var(--shell-glow-a), transparent 62%),
+    radial-gradient(980px 560px at -4% 16%, var(--shell-glow-b), transparent 58%),
+    radial-gradient(900px 720px at 50% 118%, var(--shell-glow-c), transparent 62%),
+    var(--shell-base);
+  background-attachment: fixed;
+  transition: background 400ms ease, color 260ms ease;
+}
+
+/* Slow drifting glow — the "fluid" part of the premium dark theme. */
+.app-shell::after {
+  content: "";
+  position: fixed;
+  inset: -20%;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(620px 420px at 22% 30%, var(--shell-glow-a), transparent 70%),
+    radial-gradient(540px 380px at 76% 62%, var(--shell-glow-b), transparent 72%);
+  opacity: 0.55;
+  filter: blur(30px);
+  animation: glowDrift 26s ease-in-out infinite alternate;
+}
+
+@keyframes glowDrift {
+  0% { transform: translate3d(-1.5%, -1%, 0) scale(1); opacity: 0.42; }
+  50% { transform: translate3d(1.5%, 1.5%, 0) scale(1.05); opacity: 0.6; }
+  100% { transform: translate3d(-0.5%, 2%, 0) scale(1.02); opacity: 0.48; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-shell::after {
+    animation: none;
+  }
 }
 
 .ambient {
@@ -2052,9 +2114,9 @@ input[type="range"]::-webkit-slider-thumb {
   place-items: center;
   overflow: hidden;
   background:
-    radial-gradient(900px 500px at 50% 8%, rgba(34, 211, 238, 0.14), transparent 62%),
-    radial-gradient(700px 460px at 80% 90%, rgba(52, 211, 153, 0.09), transparent 60%),
-    #050a12;
+    radial-gradient(900px 500px at 50% 8%, var(--shell-glow-a), transparent 62%),
+    radial-gradient(700px 460px at 80% 90%, var(--shell-glow-b), transparent 60%),
+    var(--shell-base);
   z-index: 999;
 }
 
@@ -2595,4 +2657,289 @@ input[type="range"]::-moz-range-thumb {
 .map-fallback-hint {
   font-size: 10.5px !important;
   color: #6f8098 !important;
+}
+
+/* ------------------------------------------------------------------ */
+/* Theme toggle                                                        */
+/* ------------------------------------------------------------------ */
+
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 11px;
+  border: 1px solid var(--border-strong);
+  background: var(--panel-raised);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: transform 180ms ease, border-color 180ms ease, color 180ms ease, background 180ms ease;
+}
+
+.theme-toggle:hover {
+  transform: translateY(-1px);
+  color: var(--accent);
+  border-color: rgba(34, 211, 238, 0.4);
+}
+
+.theme-toggle.is-light {
+  color: #b45309;
+  border-color: rgba(180, 83, 9, 0.35);
+}
+
+.chip.syncing {
+  color: #a5f3fc;
+  background: rgba(34, 211, 238, 0.12);
+  border-color: rgba(34, 211, 238, 0.3);
+}
+
+.live-pill.is-syncing {
+  color: #a5f3fc;
+  background: rgba(34, 211, 238, 0.1);
+}
+
+.live-pill.is-syncing .live-dot {
+  background: var(--accent);
+  animation: syncingPulse 1.4s ease-in-out infinite;
+}
+
+@keyframes syncingPulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.45); opacity: 0.45; }
+}
+
+.info-banner {
+  border-color: rgba(34, 211, 238, 0.26);
+  background: rgba(34, 211, 238, 0.07);
+  color: #b6ecf7;
+}
+
+/* ------------------------------------------------------------------ */
+/* Light theme surface overrides                                       */
+/* ------------------------------------------------------------------ */
+
+html[data-theme="light"] body {
+  color: var(--text);
+}
+
+html[data-theme="light"] ::selection {
+  background: rgba(8, 145, 178, 0.18);
+  color: #04121b;
+}
+
+html[data-theme="light"] .ambient {
+  background-image:
+    linear-gradient(rgba(15, 23, 42, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(15, 23, 42, 0.045) 1px, transparent 1px);
+  opacity: 0.7;
+}
+
+html[data-theme="light"] .rail {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(240, 246, 253, 0.9));
+  box-shadow: 12px 0 40px -34px rgba(15, 23, 42, 0.4);
+}
+
+html[data-theme="light"] .rail-btn:hover {
+  background: rgba(15, 23, 42, 0.05);
+}
+
+html[data-theme="light"] .rail-btn.is-active,
+html[data-theme="light"] .primary-btn,
+html[data-theme="light"] .segmented button.is-active,
+html[data-theme="light"] .search-submit,
+html[data-theme="light"] .bubble-avatar {
+  color: #03212b;
+}
+
+html[data-theme="light"] .search-shell,
+html[data-theme="light"] .search-results,
+html[data-theme="light"] .segmented,
+html[data-theme="light"] .ai-tabs,
+html[data-theme="light"] .input {
+  background: rgba(255, 255, 255, 0.92);
+  border-color: rgba(15, 23, 42, 0.12);
+}
+
+html[data-theme="light"] .search-shell input::placeholder {
+  color: #8595aa;
+}
+
+html[data-theme="light"] .ghost-btn {
+  background: rgba(15, 23, 42, 0.04);
+  border-color: rgba(15, 23, 42, 0.12);
+  color: var(--text-dim);
+}
+
+html[data-theme="light"] .ghost-btn:hover {
+  background: rgba(15, 23, 42, 0.08);
+}
+
+html[data-theme="light"] .panel,
+html[data-theme="light"] .kpi-card {
+  background: linear-gradient(158deg, rgba(255, 255, 255, 0.94), rgba(244, 248, 253, 0.9));
+  box-shadow: var(--shadow-panel);
+}
+
+html[data-theme="light"] .panel::before {
+  background: linear-gradient(120deg, rgba(255, 255, 255, 0.8), transparent 30%);
+}
+
+html[data-theme="light"] .kpi-card.accent {
+  background: linear-gradient(158deg, rgba(240, 252, 255, 0.96), rgba(236, 246, 250, 0.92));
+  border-color: rgba(8, 145, 178, 0.24);
+}
+
+html[data-theme="light"] .kpi-card.accent::after {
+  background: radial-gradient(circle, rgba(8, 145, 178, 0.12), transparent 68%);
+}
+
+html[data-theme="light"] .inline-status,
+html[data-theme="light"] .metric-grid > div,
+html[data-theme="light"] .telegram-stats div,
+html[data-theme="light"] .ai-brief,
+html[data-theme="light"] .bubble.user {
+  background: rgba(15, 23, 42, 0.04);
+}
+
+html[data-theme="light"] .chip.subtle,
+html[data-theme="light"] .kpi-spark,
+html[data-theme="light"] .banner {
+  background: rgba(15, 23, 42, 0.06);
+}
+
+html[data-theme="light"] .banner code {
+  background: rgba(15, 23, 42, 0.1);
+}
+
+html[data-theme="light"] .error-banner {
+  color: #b91c1c;
+  background: rgba(220, 38, 38, 0.07);
+  border-color: rgba(220, 38, 38, 0.24);
+}
+
+html[data-theme="light"] .warn-banner {
+  color: #92400e;
+  background: rgba(251, 191, 36, 0.14);
+  border-color: rgba(180, 83, 9, 0.26);
+}
+
+html[data-theme="light"] .info-banner {
+  color: #0e7490;
+  background: rgba(8, 145, 178, 0.08);
+  border-color: rgba(8, 145, 178, 0.22);
+}
+
+html[data-theme="light"] .chip.ok,
+html[data-theme="light"] .level-low,
+html[data-theme="light"] .chip.risk-chip-low {
+  color: #047857;
+}
+
+html[data-theme="light"] .chip.warn,
+html[data-theme="light"] .level-moderate,
+html[data-theme="light"] .chip.risk-chip-moderate {
+  color: #92400e;
+}
+
+html[data-theme="light"] .level-high,
+html[data-theme="light"] .chip.risk-chip-high {
+  color: #9a3412;
+}
+
+html[data-theme="light"] .level-severe,
+html[data-theme="light"] .chip.risk-chip-severe,
+html[data-theme="light"] .level-flood {
+  color: #b91c1c;
+}
+
+html[data-theme="light"] .live-pill {
+  color: #047857;
+  background: rgba(5, 150, 105, 0.1);
+  border-color: rgba(5, 150, 105, 0.22);
+}
+
+html[data-theme="light"] .live-pill.is-syncing {
+  color: #0e7490;
+  background: rgba(8, 145, 178, 0.1);
+}
+
+html[data-theme="light"] .map-canvas-wrap {
+  background: #e6edf6;
+}
+
+html[data-theme="light"] .map-mode-chip,
+html[data-theme="light"] .map-legend,
+html[data-theme="light"] .map-hint,
+html[data-theme="light"] .map-tile-note {
+  background: rgba(255, 255, 255, 0.92);
+  border-color: rgba(15, 23, 42, 0.12);
+  color: #35465c;
+  box-shadow: 0 12px 30px -24px rgba(15, 23, 42, 0.6);
+}
+
+html[data-theme="light"] .map-loading {
+  background: rgba(238, 243, 250, 0.82);
+  color: var(--muted);
+}
+
+html[data-theme="light"] .maplibregl-ctrl-group {
+  background: rgba(255, 255, 255, 0.95) !important;
+  border-color: rgba(15, 23, 42, 0.14) !important;
+}
+
+html[data-theme="light"] .maplibregl-ctrl-group button span {
+  filter: none;
+}
+
+html[data-theme="light"] .maplibregl-ctrl-scale,
+html[data-theme="light"] .maplibregl-ctrl-attrib {
+  background: rgba(255, 255, 255, 0.9) !important;
+  color: #475569 !important;
+  border-color: rgba(15, 23, 42, 0.2) !important;
+}
+
+html[data-theme="light"] .maplibregl-ctrl-attrib a {
+  color: #334155 !important;
+}
+
+html[data-theme="light"] .maplibregl-popup-content {
+  background: rgba(255, 255, 255, 0.98) !important;
+  color: #0b1524 !important;
+  border-color: rgba(15, 23, 42, 0.14);
+}
+
+html[data-theme="light"] .maplibregl-popup-content strong {
+  color: #04121b;
+}
+
+html[data-theme="light"] .maplibregl-popup-tip {
+  border-top-color: rgba(255, 255, 255, 0.98) !important;
+  border-bottom-color: rgba(255, 255, 255, 0.98) !important;
+}
+
+html[data-theme="light"] .panel-eyebrow,
+html[data-theme="light"] .source-line,
+html[data-theme="light"] .map-fallback-hint {
+  color: #64748b !important;
+}
+
+html[data-theme="light"] .map-fallback-inner li button {
+  background: rgba(15, 23, 42, 0.035);
+  border-color: rgba(15, 23, 42, 0.1);
+  color: var(--text-dim);
+}
+
+html[data-theme="light"] .telegram-actions .ghost-btn,
+html[data-theme="light"] .ai-tabs button.is-active {
+  background: rgba(15, 23, 42, 0.07);
+}
+
+html[data-theme="light"] .value-skeleton {
+  background: linear-gradient(90deg, rgba(15, 23, 42, 0.08), rgba(15, 23, 42, 0.16), rgba(15, 23, 42, 0.08));
+}
+
+html[data-theme="light"] .spinner {
+  border-color: rgba(15, 23, 42, 0.16);
+  border-top-color: var(--accent);
 }

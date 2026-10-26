@@ -18,6 +18,7 @@ import {
   LocateFixed,
   Map as MapIcon,
   MessageSquare,
+  Moon,
   Phone,
   Radio,
   RefreshCw,
@@ -171,6 +172,12 @@ export default function App() {
   const [booted, setBooted] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [lastSync, setLastSync] = useState<Date | null>(null);
+  const [recoveryAttempt, setRecoveryAttempt] = useState(0);
+  const [theme, setTheme] = useState<"dark" | "light">(() => {
+    if (typeof window === "undefined") return "dark";
+    const saved = window.localStorage.getItem("fs.theme");
+    return saved === "light" ? "light" : "dark";
+  });
   const [error, setError] = useState<string | null>(null);
 
   const [countryBoundary, setCountryBoundary] = useState<Record<string, unknown> | null>(null);
@@ -302,6 +309,15 @@ export default function App() {
 
   const alertZoneCount = useMemo(() => points.filter((point) => point.risk_score >= 68).length, [points]);
 
+  const dataLooksEmpty = useMemo(() => {
+    if (!points.length) return true;
+    return points.every(
+      (point) => !point.has_live_data && point.rainfall_24h_mm === 0 && point.risk_score === 0
+    );
+  }, [points]);
+
+  const pipelineHealthy = Boolean(upstreamStatus?.core_data_live) && !dataLooksEmpty;
+
   const liveSourceCount = useMemo(() => {
     if (!upstreamStatus) return 0;
     return [
@@ -311,6 +327,30 @@ export default function App() {
       upstreamStatus.ai?.live
     ].filter(Boolean).length;
   }, [upstreamStatus]);
+
+  const feedHealth = useMemo(
+    () => [
+      {
+        key: "open_meteo",
+        label: "Open-Meteo",
+        live: Boolean(upstreamStatus?.open_meteo.live || upstreamStatus?.openweather_forecast_fallback.live)
+      },
+      { key: "nasa", label: "NASA", live: Boolean(upstreamStatus?.nasa_power.live) },
+      { key: "river", label: "river", live: Boolean(upstreamStatus?.open_meteo_flood.live) },
+      { key: "ai", label: "Groq", live: Boolean(upstreamStatus?.ai?.live) }
+    ],
+    [upstreamStatus]
+  );
+
+  const downFeeds = feedHealth.filter((feed) => !feed.live).map((feed) => feed.label);
+  const warmingUp = dataLooksEmpty && recoveryAttempt < 12;
+  const pipelineState: "nominal" | "partial" | "warming" | "degraded" = warmingUp
+    ? "warming"
+    : liveSourceCount >= 4
+      ? "nominal"
+      : liveSourceCount >= 3
+        ? "partial"
+        : "degraded";
 
   const aiModelLabel = botInfo?.ai_model || "openai/gpt-oss-20b";
   const telegramUsername = (botInfo?.username || import.meta.env.VITE_TELEGRAM_BOT_USERNAME || "").replace(/^@/, "");
@@ -330,7 +370,9 @@ export default function App() {
 
   async function loadGrid(isRefresh = false) {
     if (isRefresh) setRefreshing(true);
-    setLoading(true);
+    // Only the first load shows the full-screen map skeleton; background
+    // recovery polls must not flash the overlay over live numbers.
+    if (!isRefresh) setLoading(true);
 
     try {
       // Primary payload first: the dashboard lights up as soon as risk data lands.
@@ -474,6 +516,15 @@ export default function App() {
   }
 
   useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    try {
+      window.localStorage.setItem("fs.theme", theme);
+    } catch {
+      /* storage can be blocked in private mode */
+    }
+  }, [theme]);
+
+  useEffect(() => {
     loadGrid();
     const timer = setInterval(() => loadGrid(true), 5 * 60 * 1000);
     const bootTimer = setTimeout(() => setBooted(true), 2200);
@@ -482,6 +533,24 @@ export default function App() {
       clearTimeout(bootTimer);
     };
   }, []);
+
+  // Self-healing: a cold backend can answer with zeros while it warms its
+  // upstream feeds. Poll faster until real data lands, then stop.
+  useEffect(() => {
+    if (loading || booted === false) return;
+    if (pipelineHealthy || recoveryAttempt >= 12) return;
+    const timer = setTimeout(() => {
+      setRecoveryAttempt((attempt) => attempt + 1);
+      loadGrid(true);
+    }, 8000);
+    return () => clearTimeout(timer);
+  }, [booted, loading, pipelineHealthy, recoveryAttempt, points.length]);
+
+  useEffect(() => {
+    if (pipelineHealthy) {
+      setRecoveryAttempt(0);
+    }
+  }, [pipelineHealthy]);
 
   useEffect(() => {
     fetchBotInfo().then(setBotInfo).catch(() => null);
@@ -645,6 +714,9 @@ export default function App() {
   }
 
   const initialLoading = loading && !points.length;
+  // While a cold backend warms its upstreams, show skeletons instead of a
+  // misleading wall of zeros.
+  const kpiSkeleton = initialLoading || warmingUp;
 
   if (initialLoading && !booted) {
     return <LoadingScreen />;
@@ -735,8 +807,20 @@ export default function App() {
               <LocateFixed size={16} />
               <span>My area</span>
             </button>
-            <div className="live-pill" title={`Last sync ${timeAgo(lastSync)}`}>
-              <span className="live-dot" /> Live · {timeAgo(lastSync)}
+            <button
+              className={`theme-toggle ${theme === "dark" ? "is-dark" : "is-light"}`}
+              onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+              title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+              aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+            >
+              {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
+            </button>
+            <div
+              className={`live-pill ${pipelineHealthy ? "" : "is-syncing"}`}
+              title={lastSync ? `Last sync ${lastSync.toLocaleTimeString()}` : "Contacting the forecast pipeline"}
+            >
+              <span className="live-dot" />
+              {lastSync ? `Live · ${timeAgo(lastSync)}` : "Syncing feeds…"}
             </div>
             <button className="primary-btn" onClick={() => loadGrid(true)} disabled={refreshing}>
               <RefreshCw size={16} className={refreshing ? "spin" : ""} />
@@ -758,12 +842,15 @@ export default function App() {
               <Gauge size={17} />
             </div>
             <div className="kpi-value">
-              {initialLoading ? <span className="value-skeleton" /> : nationalIndex}
-              {initialLoading ? null : <small>/100</small>}
+              {kpiSkeleton ? <span className="value-skeleton" /> : nationalIndex}
+              {kpiSkeleton ? null : <small>/100</small>}
             </div>
             <div className="kpi-foot">
               <span className="chip subtle">{levelText(riskBandFromScore(nationalIndex))}</span>
-              <span>{points.length} zones monitored</span>
+              <span>
+                {points.length} zones monitored
+                {pipelineState === "warming" ? " · warming upstreams" : ""}
+              </span>
             </div>
             <div className="kpi-spark">
               <span style={{ width: `${nationalIndex}%` }} />
@@ -776,7 +863,7 @@ export default function App() {
               <AlertTriangle size={17} />
             </div>
             <div className="kpi-value compact">
-              {initialLoading ? <span className="value-skeleton wide" /> : peakPoint?.name || "—"}
+              {kpiSkeleton ? <span className="value-skeleton wide" /> : peakPoint?.name || "—"}
             </div>
             <div className="kpi-foot">
               {peakPoint ? (
@@ -798,8 +885,8 @@ export default function App() {
               <Bell size={17} />
             </div>
             <div className="kpi-value">
-              {initialLoading ? <span className="value-skeleton" /> : alertZoneCount}
-              {initialLoading ? null : <small>high+</small>}
+              {kpiSkeleton ? <span className="value-skeleton" /> : alertZoneCount}
+              {kpiSkeleton ? null : <small>high+</small>}
             </div>
             <div className="kpi-foot">
               <span className="chip subtle">threshold 68</span>
@@ -813,14 +900,30 @@ export default function App() {
               <Layers3 size={17} />
             </div>
             <div className="kpi-value">
-              {initialLoading ? <span className="value-skeleton" /> : liveSourceCount}
-              {initialLoading ? null : <small>/4 live</small>}
+              {kpiSkeleton ? <span className="value-skeleton" /> : liveSourceCount}
+              {kpiSkeleton ? null : <small>/4 live</small>}
             </div>
             <div className="kpi-foot">
-              <span className={`chip ${liveSourceCount >= 3 ? "ok" : "warn"}`}>
-                {liveSourceCount >= 3 ? "Nominal" : "Degraded"}
+              <span
+                className={`chip ${
+                  pipelineState === "nominal"
+                    ? "ok"
+                    : pipelineState === "warming"
+                      ? "syncing"
+                      : "warn"
+                }`}
+              >
+                {pipelineState === "nominal"
+                  ? "Nominal"
+                  : pipelineState === "warming"
+                    ? "Warming up"
+                    : pipelineState === "partial"
+                      ? "Partial"
+                      : "Degraded"}
               </span>
-              <span>Open-Meteo · NASA · river · Groq</span>
+              <span title={downFeeds.length ? `Down: ${downFeeds.join(", ")}` : "All feeds live"}>
+                {downFeeds.length ? `Down: ${downFeeds.join(" · ")}` : "Open-Meteo · NASA · river · Groq"}
+              </span>
             </div>
           </article>
 
@@ -852,12 +955,36 @@ export default function App() {
           </div>
         ) : null}
 
-        {!error && !initialLoading && upstreamStatus && !upstreamStatus.core_data_live ? (
+        {!error && !initialLoading && pipelineState === "warming" ? (
+          <div className="banner info-banner">
+            <RefreshCw size={16} className="spin" />
+            <span>
+              Waking the forecast pipeline{recoveryAttempt ? ` · attempt ${recoveryAttempt}` : ""}. A cold backend can take
+              ~30 s to reach Open-Meteo and NASA — live numbers replace the zeros automatically.
+            </span>
+            <button className="ghost-btn" onClick={() => loadGrid(true)}>
+              Retry now
+            </button>
+          </div>
+        ) : null}
+
+        {!error && !initialLoading && pipelineState === "partial" ? (
+          <div className="banner info-banner">
+            <Radio size={16} />
+            <span>
+              {liveSourceCount}/4 feeds live — {downFeeds.join(", ")} hasn&apos;t reported yet. Everything else is
+              streaming normally; this is usually a delayed satellite or AI feed, not an outage.
+            </span>
+          </div>
+        ) : null}
+
+        {!error && !initialLoading && pipelineState === "degraded" ? (
           <div className="banner warn-banner">
             <Radio size={16} />
             <span>
-              Upstream feeds are degraded right now. Risk cells are shown without live rainfall/river input and will refresh
-              automatically every 5 minutes.
+              {downFeeds.length ? `${downFeeds.join(", ")} unreachable right now.` : "Some feeds are degraded."} Risk cells
+              keep the last known values and the dashboard retries every few seconds.
+              {upstreamStatus?.grid?.stale ? " Showing the last good snapshot from before the outage." : ""}
             </span>
             <button className="ghost-btn" onClick={() => loadGrid(true)}>
               Retry feeds

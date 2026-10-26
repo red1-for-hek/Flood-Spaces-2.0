@@ -179,6 +179,35 @@ If a CARTO URL is configured **without** a key, the app detects it, ignores it a
 
 ---
 
+## 🎨 Themes
+
+Dark is the default. The sun/moon button in the top bar switches to a light theme; the choice is
+stored in `localStorage` (`fs.theme`) and applied before first paint via `data-theme` on `<html>`.
+Both themes share one design-token set (`--bg`, `--panel`, `--text`, `--shell-glow-*`), so the map,
+charts and cards stay legible in either mode.
+
+## 🔎 Data pipeline diagnostics
+
+`GET /api/upstream-status` now answers from the **grid that is on screen** (no extra upstream call),
+so the KPI can never disagree with the map:
+
+```json
+{
+  "open_meteo":   { "live": true,  "coverage_pct": 100 },
+  "nasa_power":   { "live": true,  "coverage_pct": 100, "observed_day": "20261025" },
+  "open_meteo_flood": { "live": true, "coverage_pct": 100 },
+  "ai":           { "live": true,  "provider": "groq", "model": "openai/gpt-oss-20b" },
+  "grid": {
+    "zones": 16, "live_zones": 16,
+    "compute_seconds": 1.9,
+    "stale": false,
+    "last_reason": null
+  }
+}
+```
+
+Healthy reports cache for 3 minutes; degraded ones for 15 seconds, so recovery is visible fast.
+
 ## ☁️ Deployment — the important bit
 
 **Do not run this backend on Vercel.** Vercel functions are short-lived and stateless: the 5-minute scheduler dies between requests and subscribers disappear. Use:
@@ -250,6 +279,9 @@ Full walkthrough: [DEPLOYMENT.md](DEPLOYMENT.md).
 | Toast: "A background request failed — … 'M_ID'" | A **third-party** script (preview harness / browser extension / analytics) rejects a promise. That identifier does not exist in this codebase or its bundle. | Harmless — dismiss it, or open the site in a clean tab. Errors are also stored in `window.__floodSpacesErrors` |
 | Intro shows, then a blank page | WebGL blocked (sandboxed iframe, disabled GPU acceleration) — MapLibre used to throw and unmount React | Fixed: the map now detects WebGL2 and renders a *zone list* fallback; an error boundary + crash overlay keep the rest of the dashboard alive |
 | "Map view unavailable" panel | Same WebGL limitation | Enable hardware acceleration / open outside the embedded frame, or keep using the zone list |
+| Everything is `0/100`, `0 mm`, `0/4 live` | A **cold instance** was still warming its upstream feeds (common on free hosts with a fractional CPU) | Fixed: the grid is now built with **one batched Open-Meteo request** instead of 16 fan-out calls, retried at boot, cached to disk, and the dashboard retries every 8 s. `/api/upstream-status` → `grid.compute_seconds` shows the real cost |
+| Pipeline says `3/4 live` | One feed is delayed. NASA POWER publishes with a lag; Groq is off without `GROQ_API_KEY` | Hover the KPI to see which feed is down; `3/4` now reads **Partial**, not Degraded. Add the missing key or wait for the satellite latency |
+| `Degraded` banner right after a deploy | First request hit a sleeping/spinning-up container | Wait ~30 s; the banner clears itself. `GET /api/upstream-status` shows `grid.last_reason` |
 | Everything shows `n/a` / 0 mm | Backend can't reach Open-Meteo / NASA from its host | Check `/api/upstream-status`; the banner tells you when feeds are degraded |
 | "Live backend unreachable" | `VITE_API_BASE_URL` missing or wrong | Set it to your Render URL and redeploy the frontend |
 | Bot never replies | `TELEGRAM_BOT_TOKEN` missing | `/api/telegram/bot-info` shows `configured: false` until it is set |

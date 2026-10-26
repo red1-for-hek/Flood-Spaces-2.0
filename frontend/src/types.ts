@@ -67,6 +67,8 @@ export type UpstreamStatus = {
   open_meteo: {
     live: boolean;
     forecast_source: string;
+    reason?: string | null;
+    coverage_pct?: number;
   };
   openweather_forecast_fallback: {
     live: boolean;
@@ -76,11 +78,13 @@ export type UpstreamStatus = {
     value_mm: number;
     observed_day?: string | null;
     reason?: string | null;
+    coverage_pct?: number;
   };
   open_meteo_flood: {
     live: boolean;
     value_m3s: number;
     reason?: string | null;
+    coverage_pct?: number;
   };
   ai: AIProviderStatus;
   telegram?: {
@@ -90,6 +94,17 @@ export type UpstreamStatus = {
   };
   forecast_pipeline_live: boolean;
   core_data_live: boolean;
+  grid?: {
+    zones: number;
+    live_zones: number;
+    computed_at?: string | null;
+    compute_seconds?: number | null;
+    stale?: boolean;
+    computing?: boolean;
+    last_success_at?: string | null;
+    last_duration_s?: number | null;
+    last_reason?: string | null;
+  };
 };
 
 export type BotInfo = {

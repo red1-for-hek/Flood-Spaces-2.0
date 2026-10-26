@@ -1133,6 +1133,13 @@ def openmeteo_sdk_to_payload(response) -> Dict:
     }
 
 
+OPEN_METEO_FORECAST_URL = os.getenv("OPEN_METEO_FORECAST_URL", "https://api.open-meteo.com/v1/forecast")
+OPEN_METEO_FLOOD_URL = os.getenv("OPEN_METEO_FLOOD_URL", "https://flood-api.open-meteo.com/v1/flood")
+NASA_POWER_URL = os.getenv("NASA_POWER_URL", "https://power.larc.nasa.gov/api/temporal/daily/point")
+NASA_EONET_URL = os.getenv("NASA_EONET_URL", "https://eonet.gsfc.nasa.gov/api/v3/events")
+GDACS_URL = os.getenv("GDACS_URL", "https://www.gdacs.org/xml/rss.xml")
+
+
 async def fetch_open_meteo(lat: float, lon: float) -> Dict:
     base_params = {
         "latitude": lat,
@@ -1141,7 +1148,7 @@ async def fetch_open_meteo(lat: float, lon: float) -> Dict:
         "daily": ["precipitation_sum", "temperature_2m_max", "wind_speed_10m_max"],
         "timezone": "auto",
     }
-    url = "https://api.open-meteo.com/v1/forecast"
+    url = OPEN_METEO_FORECAST_URL
     headers = {"User-Agent": "Flood-Spaces/1.0"}
 
     if circuit_open("open_meteo"):
@@ -1215,7 +1222,7 @@ async def fetch_nasa_power_precip(lat: float, lon: float) -> Dict:
         "end": today.strftime("%Y%m%d"),
         "format": "JSON",
     }
-    url = "https://power.larc.nasa.gov/api/temporal/daily/point"
+    url = NASA_POWER_URL
     headers = {"User-Agent": "Flood-Spaces/1.0"}
     nasa_api_key = os.getenv("NASA_API_KEY", "").strip()
     if nasa_api_key:
@@ -1285,7 +1292,7 @@ async def fetch_open_meteo_river_discharge(lat: float, lon: float) -> Dict:
         "forecast_days": 2,
         "timezone": "auto",
     }
-    url = "https://flood-api.open-meteo.com/v1/flood"
+    url = OPEN_METEO_FLOOD_URL
     headers = {"User-Agent": "Flood-Spaces/1.0"}
     if circuit_open("river"):
         return {"value_m3s": 0.0, "live": False, "source": "open-meteo-flood", "reason": "circuit_open"}
@@ -1335,6 +1342,143 @@ async def fetch_open_meteo_river_discharge(lat: float, lon: float) -> Dict:
         "source": "open-meteo-flood",
         "reason": "unknown_flood_api_failure",
     }
+
+
+async def fetch_open_meteo_batch(
+    coords: List[Tuple[float, float]],
+) -> List[Dict | None]:
+    """Fetch the forecast for many points in a single request.
+
+    Open-Meteo accepts comma-separated latitude/longitude lists, so 16 cities
+    cost one round trip instead of 16. On small instances (Render free = 0.1
+    CPU) the per-city fan-out used to blow the 22 s budget and every city
+    silently fell back to zeros; batching removes that failure mode.
+    """
+    if not coords:
+        return []
+
+    headers = {"User-Agent": "Flood-Spaces/1.0"}
+    lats = ",".join(f"{lat:.4f}" for lat, _ in coords)
+    lons = ",".join(f"{lon:.4f}" for _, lon in coords)
+
+    if circuit_open("open_meteo"):
+        return [None] * len(coords)
+
+    for forecast_days in (MONTHLY_FORECAST_DAYS, 16, 7):
+        params = {
+            "latitude": lats,
+            "longitude": lons,
+            "hourly": "precipitation,wind_speed_10m",
+            "daily": "precipitation_sum,temperature_2m_max,wind_speed_10m_max",
+            "forecast_days": forecast_days,
+            "timezone": "auto",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=25, headers=headers) as client:
+                response = await client.get(OPEN_METEO_FORECAST_URL, params=params)
+                response.raise_for_status()
+                data = response.json()
+        except Exception as exc:
+            logger.warning("Open-Meteo batch failed (%s days): %s", forecast_days, safe_error_message(exc))
+            continue
+
+        rows = data if isinstance(data, list) else [data]
+        if len(rows) != len(coords):
+            logger.warning(
+                "Open-Meteo batch returned %s rows for %s points", len(rows), len(coords)
+            )
+            continue
+
+        payloads: List[Dict | None] = []
+        for row in rows:
+            if isinstance(row, dict) and row.get("hourly"):
+                row["_meta"] = {
+                    "live": True,
+                    "source": "open-meteo",
+                    "forecast_days": len(row.get("daily", {}).get("time", [])),
+                }
+                payloads.append(row)
+            else:
+                payloads.append(None)
+
+        if any(payloads):
+            reset_circuit("open_meteo")
+            return payloads
+
+    trip_circuit("open_meteo")
+    return [None] * len(coords)
+
+
+async def fetch_open_meteo_river_batch(coords: List[Tuple[float, float]]) -> List[Dict | None]:
+    """River discharge for many points in one Open-Meteo Flood API request."""
+    if not coords:
+        return []
+
+    headers = {"User-Agent": "Flood-Spaces/1.0"}
+    lats = ",".join(f"{lat:.4f}" for lat, _ in coords)
+    lons = ",".join(f"{lon:.4f}" for _, lon in coords)
+    params = {
+        "latitude": lats,
+        "longitude": lons,
+        "daily": "river_discharge_max",
+        "forecast_days": 2,
+        "timezone": "auto",
+    }
+
+    if circuit_open("river"):
+        return [None] * len(coords)
+
+    try:
+        async with httpx.AsyncClient(timeout=20, headers=headers) as client:
+            response = await client.get(OPEN_METEO_FLOOD_URL, params=params)
+            response.raise_for_status()
+            data = response.json()
+    except Exception as exc:
+        logger.warning("Flood API batch failed: %s", safe_error_message(exc))
+        trip_circuit("river")
+        return [None] * len(coords)
+
+    rows = data if isinstance(data, list) else [data]
+    if len(rows) != len(coords):
+        logger.warning("Flood API batch returned %s rows for %s points", len(rows), len(coords))
+        return [None] * len(coords)
+
+    metas: List[Dict | None] = []
+    for row in rows:
+        values = (row or {}).get("daily", {}).get("river_discharge_max", []) if isinstance(row, dict) else []
+        value = values[0] if values else None
+        if value is None:
+            metas.append(None)
+        else:
+            metas.append({"value_m3s": float(value), "live": True, "source": "open-meteo-flood"})
+
+    if any(metas):
+        reset_circuit("river")
+    return metas
+
+
+async def fetch_nasa_power_batch(coords: List[Tuple[float, float]], limit: int = 8) -> List[Dict | None]:
+    """NASA POWER enrichment for the first few points only.
+
+    One request per point and NASA's endpoint is slow; the satellite average is
+    a secondary signal, so cap the work instead of letting it stall the grid.
+    """
+    if not coords:
+        return []
+    semaphore = asyncio.Semaphore(4)
+    results: List[Dict | None] = [None] * len(coords)
+
+    async def run(index: int, lat: float, lon: float) -> None:
+        async with semaphore:
+            try:
+                meta = await asyncio.wait_for(fetch_nasa_power_precip(lat, lon), timeout=12)
+            except Exception:
+                meta = None
+            if meta and meta.get("live"):
+                results[index] = meta
+
+    await asyncio.gather(*(run(i, lat, lon) for i, (lat, lon) in enumerate(coords[:limit])))
+    return results
 
 
 async def fetch_openweather_current(lat: float, lon: float) -> Dict:
@@ -1404,7 +1548,7 @@ async def fetch_nasa_eonet_flood_events() -> List[Dict]:
         if age < 900:
             return cached["data"]
 
-    url = "https://eonet.gsfc.nasa.gov/api/v3/events"
+    url = NASA_EONET_URL
     params = {
         "status": "open",
         "category": "floods",
@@ -1499,7 +1643,7 @@ async def fetch_gdacs_flood_events() -> List[Dict]:
         if age < 900:
             return cached["data"]
 
-    url = "https://www.gdacs.org/xml/rss_fl_7d.xml"
+    url = GDACS_URL
     headers = {"User-Agent": "Flood-Spaces/1.0"}
 
     try:
@@ -1876,43 +2020,68 @@ def health() -> Dict:
 
 @app.get("/api/upstream-status")
 async def upstream_status() -> Dict:
+    """Health of every data source, derived from the grid that is on screen.
+
+    It used to re-fetch a sample city, so the KPI could disagree with the map
+    (grid live, status "degraded") and cost another slow round trip on cold
+    instances. Reading the cached grid keeps the numbers consistent and instant.
+    """
     cache_key = "upstream-status"
     cached = source_status_cache.get(cache_key)
     if cached:
         age = datetime.now(timezone.utc).timestamp() - cached["ts"]
-        if age < 180:
+        if age < cached.get("ttl", 180):
             return cached["data"]
 
-    sample = CITY_SEEDS[0]
-    payload, nasa_meta, river_meta, ai_meta = await asyncio.gather(
-        fetch_open_meteo(sample["lat"], sample["lon"]),
-        fetch_nasa_power_precip(sample["lat"], sample["lon"]),
-        fetch_open_meteo_river_discharge(sample["lat"], sample["lon"]),
-        check_ai_status(),
+    grid_cached = grid_cache.get("risk-grid", {}).get("data") or {}
+    grid_items = grid_cached.get("items", [])
+    grid_live = sum(1 for item in grid_items if item.get("has_live_data"))
+    source_status = grid_cached.get("source_status", {})
+
+    def pct(key: str) -> int:
+        return int(source_status.get(key, 0) or 0)
+
+    if not grid_items:
+        # Nothing computed yet: start building and report "warming".
+        schedule_grid_refresh()
+
+    ai_meta = await check_ai_status()
+    nasa_sample = next(
+        (item.get("data_sources", {}) for item in grid_items if item.get("data_sources", {}).get("nasa_live")),
+        {},
+    )
+    river_sample = next(
+        (item for item in grid_items if item.get("data_sources", {}).get("river_live")),
+        None,
     )
 
-    payload_meta = payload.get("_meta", {})
-    forecast_source = str(payload_meta.get("source", "default-no-data"))
+    open_meteo_live = pct("open_meteo_live_pct") > 0 or pct("openweather_fallback_pct") > 0
+    nasa_live = pct("nasa_live_pct") > 0
+    river_live = pct("river_live_pct") > 0
+
     data = {
-        "sample_area": sample["name"],
+        "sample_area": grid_items[0]["name"] if grid_items else CITY_SEEDS[0]["name"],
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "open_meteo": {
-            "live": forecast_source == "open-meteo",
-            "forecast_source": forecast_source,
+            "live": open_meteo_live,
+            "forecast_source": "open-meteo" if pct("open_meteo_live_pct") > 0 else "unavailable",
+            "coverage_pct": pct("open_meteo_live_pct"),
+            "reason": None if open_meteo_live else "no_live_forecast_in_grid",
         },
         "openweather_forecast_fallback": {
-            "live": forecast_source == "openweather-forecast-fallback",
+            "live": pct("openweather_fallback_pct") > 0,
         },
         "nasa_power": {
-            "live": bool(nasa_meta.get("live", False)),
-            "value_mm": nasa_meta.get("value_mm", 0.0),
-            "observed_day": nasa_meta.get("observed_day"),
-            "reason": nasa_meta.get("reason"),
+            "live": nasa_live,
+            "coverage_pct": pct("nasa_live_pct"),
+            "observed_day": nasa_sample.get("nasa_observed_day"),
+            "reason": None if nasa_live else "no_live_satellite_data_in_grid",
         },
         "open_meteo_flood": {
-            "live": bool(river_meta.get("live", False)),
-            "value_m3s": river_meta.get("value_m3s", 0.0),
-            "reason": river_meta.get("reason"),
+            "live": river_live,
+            "coverage_pct": pct("river_live_pct"),
+            "value_m3s": (river_sample or {}).get("river_discharge_m3s", 0.0),
+            "reason": None if river_live else "no_live_river_data_in_grid",
         },
         "ai": ai_meta,
         "telegram": {
@@ -1920,71 +2089,271 @@ async def upstream_status() -> Dict:
             "webhook_mode": bool(os.getenv("TELEGRAM_WEBHOOK_URL", "").strip()),
             "subscribers": len(subscriptions),
         },
-        "forecast_pipeline_live": bool(payload_meta.get("live", False)) and bool(river_meta.get("live", False)),
-        "core_data_live": bool(payload_meta.get("live", False)) and bool(nasa_meta.get("live", False)) and bool(river_meta.get("live", False)),
+        "forecast_pipeline_live": open_meteo_live and river_live,
+        "core_data_live": open_meteo_live and nasa_live and river_live,
+        "grid": {
+            "zones": len(grid_items),
+            "live_zones": grid_live,
+            "computed_at": grid_cached.get("computed_at"),
+            "compute_seconds": grid_cached.get("compute_seconds"),
+            "stale": bool(grid_cached.get("stale")),
+            "computing": bool(risk_grid_meta.get("computing")),
+            "last_success_at": risk_grid_meta.get("last_success_at"),
+            "last_duration_s": risk_grid_meta.get("last_duration_s"),
+            "last_reason": risk_grid_meta.get("last_reason"),
+        },
     }
 
-    source_status_cache[cache_key] = {"ts": datetime.now(timezone.utc).timestamp(), "data": data}
+    # Healthy -> 3 min cache. Degraded/empty -> 15 s so recovery is visible fast.
+    healthy = data["core_data_live"] and grid_live > 0
+    ttl = 180 if healthy else 15
+    source_status_cache[cache_key] = {
+        "ts": datetime.now(timezone.utc).timestamp(),
+        "ttl": ttl,
+        "data": data,
+    }
     return data
 
 
+SNAPSHOT_DIR = Path(__file__).resolve().parent.parent / "data"
+RISK_SNAPSHOT_PATH = Path(os.getenv("RISK_SNAPSHOT_PATH", str(SNAPSHOT_DIR / "risk_grid_snapshot.json")))
+risk_grid_meta: Dict[str, object] = {
+    "computing": False,
+    "last_success_at": None,
+    "last_attempt_at": None,
+    "last_duration_s": None,
+    "last_live_count": 0,
+    "last_reason": None,
+}
+
+
+def save_risk_snapshot(data: Dict) -> None:
+    """Persist the last good grid so a restart shows real numbers, not zeros."""
+    try:
+        RISK_SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+            "data": data,
+        }
+        tmp = RISK_SNAPSHOT_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        tmp.replace(RISK_SNAPSHOT_PATH)
+    except Exception as exc:
+        logger.warning("Could not persist risk snapshot: %s", safe_error_message(exc))
+
+
+def load_risk_snapshot() -> Dict | None:
+    try:
+        if not RISK_SNAPSHOT_PATH.exists():
+            return None
+        payload = json.loads(RISK_SNAPSHOT_PATH.read_text(encoding="utf-8"))
+        data = payload.get("data")
+        if isinstance(data, dict) and data.get("items"):
+            data["snapshot_saved_at"] = payload.get("saved_at")
+            data["stale"] = True
+            return data
+    except Exception as exc:
+        logger.warning("Could not load risk snapshot: %s", safe_error_message(exc))
+    return None
+
+
+def hydrate_risk_snapshot() -> None:
+    data = load_risk_snapshot()
+    if data and "risk-grid" not in grid_cache:
+        # Serve it straight away so the dashboard is never a wall of zeros,
+        # then let the startup warmup replace it with fresh numbers.
+        grid_cache["risk-grid"] = {
+            "ts": datetime.now(timezone.utc).timestamp(),
+            "ttl": 45,
+            "data": data,
+        }
+        logger.info("Risk snapshot restored with %s zones", len(data.get("items", [])))
+
+
+def schedule_grid_refresh(delay: float = 0.0) -> None:
+    """Kick off a background grid rebuild without blocking the response."""
+    if risk_grid_meta.get("computing"):
+        return
+
+    async def runner() -> None:
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            await risk_grid(force=True)
+        except Exception as exc:
+            logger.warning("Background grid refresh failed: %s", safe_error_message(exc))
+        finally:
+            risk_grid_meta["computing"] = False
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    risk_grid_meta["computing"] = True
+    asyncio.create_task(runner())
+
+
+def grid_is_stale(data: Dict | None) -> bool:
+    if not data:
+        return True
+    live = sum(1 for item in data.get("items", []) if item.get("has_live_data"))
+    return live < max(4, len(data.get("items", [])) // 3)
+
+
+grid_lock = asyncio.Lock()
+
+
 @app.get("/api/risk-grid")
-async def risk_grid() -> Dict:
+async def risk_grid(force: bool = False) -> Dict:
+    async with grid_lock:
+        return await build_risk_grid(force=force)
+
+
+async def build_risk_grid(force: bool = False) -> Dict:
     cache_key = "risk-grid"
     cached = grid_cache.get(cache_key)
-    if cached:
+    if cached and not force:
         age = datetime.now(timezone.utc).timestamp() - cached["ts"]
         if age < cached.get("ttl", 600):
             return cached["data"]
 
-    summaries = await asyncio.gather(
-        *[asyncio.wait_for(summarize_city(city), timeout=22) for city in CITY_SEEDS],
+    started = time.monotonic()
+    risk_grid_meta["last_attempt_at"] = datetime.now(timezone.utc).isoformat()
+    coords = [(city["lat"], city["lon"]) for city in CITY_SEEDS]
+
+    # Two round trips total for forecasts + rivers, instead of 32.
+    forecast_rows, river_rows = await asyncio.gather(
+        fetch_open_meteo_batch(coords),
+        fetch_open_meteo_river_batch(coords),
         return_exceptions=True,
     )
-    results = []
-    for city, summary in zip(CITY_SEEDS, summaries):
-        if isinstance(summary, Exception):
-            fallback_payload = build_default_payload()
-            fallback_sources = {
-                "forecast_live": False,
-                "forecast_source": "default-no-data",
-                "open_meteo_live": False,
-                "openweather_forecast_fallback_live": False,
-                "nasa_live": False,
-                "nasa_observed_day": None,
-                "river_live": False,
-                "temp_live": False,
-            }
+    if isinstance(forecast_rows, BaseException):
+        logger.warning("Forecast batch crashed: %s", safe_error_message(forecast_rows))
+        forecast_rows = [None] * len(coords)
+    if isinstance(river_rows, BaseException):
+        logger.warning("River batch crashed: %s", safe_error_message(river_rows))
+        river_rows = [None] * len(coords)
+
+    # NASA is enrichment only — never let it stall the grid.
+    nasa_limit = min(len(coords), 6)
+    nasa_rows: List[Dict | None] = []
+    if not circuit_open("nasa"):
+        try:
+            nasa_rows = await asyncio.wait_for(fetch_nasa_power_batch(coords, nasa_limit), timeout=18)
+        except Exception:
+            nasa_rows = []
+    while len(nasa_rows) < len(coords):
+        nasa_rows.append(None)
+
+    results: List[Dict] = []
+    for index, city in enumerate(CITY_SEEDS):
+        forecast = forecast_rows[index] if index < len(forecast_rows) else None
+        river = river_rows[index] if index < len(river_rows) else None
+        nasa = nasa_rows[index] if index < len(nasa_rows) else None
+
+        if not forecast:
+            # One city missing from the batch: retry just that point.
+            try:
+                forecast = await asyncio.wait_for(fetch_open_meteo(city["lat"], city["lon"]), timeout=15)
+            except Exception:
+                forecast = None
+
+        payload = forecast if forecast and forecast.get("hourly") else build_default_payload()
+        payload_meta = payload.get("_meta", {})
+        nasa_meta = nasa or {
+            "value_mm": 0.0,
+            "live": False,
+            "source": "nasa-power",
+            "observed_day": None,
+            "reason": "not_queried",
+        }
+        river_meta = river or {
+            "value_m3s": 0.0,
+            "live": False,
+            "source": "open-meteo-flood",
+            "reason": "batch_unavailable",
+        }
+        source_status = normalize_source_status(payload_meta, nasa_meta, river_meta, {})
+        try:
             results.append(
                 summarize_forecast(
                     city["name"],
                     city["lat"],
                     city["lon"],
-                    fallback_payload,
+                    payload,
+                    float(nasa_meta.get("value_mm", 0.0) or 0.0),
+                    float(river_meta.get("value_m3s", 0.0) or 0.0),
+                    None,
+                    source_status=source_status,
+                )
+            )
+        except Exception as exc:
+            logger.warning("Summary failed for %s: %s", city["name"], safe_error_message(exc))
+            results.append(
+                summarize_forecast(
+                    city["name"],
+                    city["lat"],
+                    city["lon"],
+                    build_default_payload(),
                     0.0,
                     0.0,
                     None,
-                    source_status=fallback_sources,
+                    source_status=normalize_source_status({}, {}, {}, {}),
                 )
             )
-        else:
-            results.append(summary)
 
     events = await fetch_global_flood_events()
     if events:
         results = [apply_flood_event_signal(item, events) for item in results]
 
+    live_count = sum(1 for item in results if item.get("has_live_data"))
+    duration = round(time.monotonic() - started, 2)
+
     data = {
         "country_focus": "Bangladesh forecast focus",
-        "source": ["Open-Meteo", "OpenWeather fallback", "Open-Meteo Flood", "NASA POWER", "NASA EONET Floods", "GDACS Floods"],
+        "source": [
+            "Open-Meteo",
+            "Open-Meteo Flood",
+            "NASA POWER",
+            "NASA EONET Floods",
+            "GDACS Floods",
+        ],
         "source_status": summarize_source_health(results),
         "active_flood_events_count": len(events),
         "active_flood_events_source": "NASA EONET + GDACS",
         "items": results,
+        "live_count": live_count,
+        "computed_at": datetime.now(timezone.utc).isoformat(),
+        "compute_seconds": duration,
+        "stale": False,
     }
-    live_count = sum(1 for item in results if item.get("has_live_data"))
-    cache_ttl = 600 if live_count >= max(4, len(results) // 3) else 300
+
+    if live_count == 0:
+        # Keep the last good numbers rather than serving a wall of zeros.
+        snapshot = load_risk_snapshot()
+        if snapshot and snapshot.get("items"):
+            snapshot["stale"] = True
+            snapshot["refresh_failed_at"] = data["computed_at"]
+            grid_cache[cache_key] = {
+                "ts": datetime.now(timezone.utc).timestamp(),
+                "ttl": 45,
+                "data": snapshot,
+            }
+            risk_grid_meta["last_reason"] = "upstream_unavailable_using_snapshot"
+            return snapshot
+
+    cache_ttl = 600 if live_count >= max(4, len(results) // 3) else 60
     grid_cache[cache_key] = {"ts": datetime.now(timezone.utc).timestamp(), "ttl": cache_ttl, "data": data}
+    risk_grid_meta.update(
+        {
+            "last_success_at": data["computed_at"],
+            "last_duration_s": duration,
+            "last_live_count": live_count,
+            "last_reason": None if live_count else "no_live_data",
+        }
+    )
+    if live_count:
+        save_risk_snapshot(data)
     return data
 
 
@@ -3083,12 +3452,24 @@ def _coerce_float(value) -> float | None:
         return None
 
 
-async def warm_risk_grid() -> None:
-    try:
-        await risk_grid()
-        logger.info("Risk grid warmed for the dashboard")
-    except Exception as exc:
-        logger.info("Risk grid warmup skipped: %s", safe_error_message(exc))
+async def warm_risk_grid(attempts: int = 5) -> None:
+    """Build the grid at boot, retrying while instances and DNS settle.
+
+    Render free instances start cold with a fractional CPU; the first upstream
+    round trip often fails. Retrying with backoff is what turns the dashboard
+    from "0/100, 0/4 live" into live numbers without a manual refresh.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            data = await risk_grid(force=True)
+            live = sum(1 for item in data.get("items", []) if item.get("has_live_data"))
+            if live:
+                logger.info("Risk grid warmed: %s/%s zones live in %ss", live, len(data.get("items", [])), data.get("compute_seconds"))
+                return
+            logger.info("Risk grid warmup %s/%s: no live zones yet", attempt, attempts)
+        except Exception as exc:
+            logger.info("Risk grid warmup %s/%s failed: %s", attempt, attempts, safe_error_message(exc))
+        await asyncio.sleep(min(60, 8 * attempt))
 
 
 async def process_alert_checks() -> Dict:
@@ -3336,6 +3717,9 @@ async def startup_event() -> None:
     # Load persisted bot subscribers so alerts survive restarts / redeploys.
     load_telegram_state()
     sync_subscriptions_from_profiles()
+
+    # Serve the last known-good grid immediately, then refresh in the background.
+    hydrate_risk_snapshot()
 
     has_telegram = bool(telegram_token())
     webhook_mode = bool(os.getenv("TELEGRAM_WEBHOOK_URL", "").strip())

@@ -73,6 +73,10 @@ export type UpstreamStatus = {
   openweather_forecast_fallback: {
     live: boolean;
   };
+  nasa_forecast_fallback?: {
+    live: boolean;
+    coverage_pct?: number;
+  };
   nasa_power: {
     live: boolean;
     value_mm: number;

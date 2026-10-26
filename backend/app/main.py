@@ -2206,7 +2206,23 @@ grid_lock = asyncio.Lock()
 @app.get("/api/risk-grid")
 async def risk_grid(force: bool = False) -> Dict:
     async with grid_lock:
-        return await build_risk_grid(force=force)
+        try:
+            return await asyncio.wait_for(build_risk_grid(force=force), timeout=75)
+        except asyncio.TimeoutError:
+            logger.warning("Grid build exceeded 75 s — serving the last good snapshot")
+            risk_grid_meta["last_reason"] = "build_timeout"
+            snapshot = load_risk_snapshot()
+            if snapshot:
+                snapshot["stale"] = True
+                return snapshot
+            return {
+                "country_focus": "Bangladesh forecast focus",
+                "items": [],
+                "stale": True,
+                "live_count": 0,
+                "computed_at": datetime.now(timezone.utc).isoformat(),
+                "source_status": {},
+            }
 
 
 async def build_risk_grid(force: bool = False) -> Dict:
@@ -2251,8 +2267,10 @@ async def build_risk_grid(force: bool = False) -> Dict:
         river = river_rows[index] if index < len(river_rows) else None
         nasa = nasa_rows[index] if index < len(nasa_rows) else None
 
-        if not forecast:
-            # One city missing from the batch: retry just that point.
+        if not forecast and any(forecast_rows):
+            # Only a few cities were missing from an otherwise good batch —
+            # retry those individually. If the whole batch failed, retrying 16
+            # points would multiply the outage by 16; use the snapshot instead.
             try:
                 forecast = await asyncio.wait_for(fetch_open_meteo(city["lat"], city["lon"]), timeout=15)
             except Exception:

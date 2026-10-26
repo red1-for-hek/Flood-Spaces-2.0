@@ -260,6 +260,10 @@ async function main() {
       ["hex surface covers every cell", Boolean(hexFill) && hexFill?.filter === undefined],
       ["location marker layer present", layers.some((layer) => layer.id === "user-location-dot")]
     );
+    checks.push(
+      ["theme defaults to dark", win.document.documentElement.dataset.theme === "dark"],
+      ["theme toggle rendered", Boolean(win.document.querySelector(".theme-toggle"))]
+    );
   }
 
   let failed = 0;

@@ -264,6 +264,17 @@ async function main() {
       ["theme defaults to dark", win.document.documentElement.dataset.theme === "dark"],
       ["theme toggle rendered", Boolean(win.document.querySelector(".theme-toggle"))]
     );
+
+    // The country hex surface must exist even when /api/boundaries returns an
+    // empty FeatureCollection (bundled outline fallback).
+    const sourceData = ((globalThis as Record<string, unknown>).__maplibreSourceData || {}) as Record<
+      string,
+      { features?: unknown[] }
+    >;
+    const hexFeatures = sourceData["risk-hexes"]?.features ?? [];
+    checks.push(
+      ["country hex grid built without live boundaries", hexFeatures.length > 200]
+    );
   }
 
   let failed = 0;

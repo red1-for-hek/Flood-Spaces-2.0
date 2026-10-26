@@ -17,7 +17,7 @@
 | 🧠 **AI copilot** | Groq `openai/gpt-oss-20b`, token-streamed chat with stop button, plus area briefings |
 | 🚨 **Automatic Telegram alerts** | Anyone who presses **Start** is subscribed instantly — alerts are pushed with no dashboard open |
 | 📊 **Dashboard UI** | KPI strip, risk gauge, confidence, 1-month outlook, river discharge, 7-day trend + weather |
-| 🛰️ **Data pipeline** | Open-Meteo forecast & flood API, NASA POWER precipitation, NASA EONET + GDACS events, OpenWeather fallback |
+| 🛰️ **Data pipeline** | Open-Meteo forecast & flood API (keyless, batched — 16 zones in 2 calls), NASA POWER precipitation (also the automatic fallback when Open-Meteo is unreachable), NASA EONET + GDACS flood-only events, OpenWeather fallback |
 | 🌍 **Search** | English + Bengali place search, geolocation, reverse-geocoded names |
 
 > ⚠️ Educational / research-grade forecasting assistant. **Not** an official disaster-warning authority.
@@ -79,7 +79,7 @@ Open **http://localhost:5173** (the dev server proxies `/api` to `http://127.0.0
 | `ALERT_CHECK_INTERVAL_MINUTES` | Optional | Scheduler cycle (5) |
 | `ALERT_COOLDOWN_MINUTES` | Optional | Anti-spam window per chat (60) |
 | `OPENWEATHER_API_KEY` | Optional | Temperature blending + forecast fallback |
-| `NASA_API_KEY` | Optional | NASA POWER / EONET key |
+| `NASA_API_KEY` | **Not needed** | NASA POWER and EONET are keyless. Setting it only raises EONET's rate limit |
 | `FRONTEND_ORIGIN` | Optional | Comma-separated allowed origins |
 
 ### `frontend/.env`
@@ -280,7 +280,7 @@ Full walkthrough: [DEPLOYMENT.md](DEPLOYMENT.md).
 | Intro shows, then a blank page | WebGL blocked (sandboxed iframe, disabled GPU acceleration) — MapLibre used to throw and unmount React | Fixed: the map now detects WebGL2 and renders a *zone list* fallback; an error boundary + crash overlay keep the rest of the dashboard alive |
 | "Map view unavailable" panel | Same WebGL limitation | Enable hardware acceleration / open outside the embedded frame, or keep using the zone list |
 | Everything is `0/100`, `0 mm`, `0/4 live` | A **cold instance** was still warming its upstream feeds (common on free hosts with a fractional CPU) | Fixed: the grid is now built with **one batched Open-Meteo request** instead of 16 fan-out calls, retried at boot, cached to disk, and the dashboard retries every 8 s. `/api/upstream-status` → `grid.compute_seconds` shows the real cost |
-| Pipeline says `3/4 live` | One feed is delayed. NASA POWER publishes with a lag; Groq is off without `GROQ_API_KEY` | Hover the KPI to see which feed is down; `3/4` now reads **Partial**, not Degraded. Add the missing key or wait for the satellite latency |
+| Pipeline says `3/4 live` | One feed is delayed. NASA POWER publishes with a lag; Groq is off without `GROQ_API_KEY` | Hover the KPI to see which feed is down; `3/4` now reads **Partial**, not Degraded. Only OpenWeather and Groq need keys — the rest are keyless |
 | `Degraded` banner right after a deploy | First request hit a sleeping/spinning-up container | Wait ~30 s; the banner clears itself. `GET /api/upstream-status` shows `grid.last_reason` |
 | Everything shows `n/a` / 0 mm | Backend can't reach Open-Meteo / NASA from its host | Check `/api/upstream-status`; the banner tells you when feeds are degraded |
 | "Live backend unreachable" | `VITE_API_BASE_URL` missing or wrong | Set it to your Render URL and redeploy the frontend |
@@ -320,4 +320,6 @@ Apache-2.0 — see [LICENSE](LICENSE).
 ## 🙌 Credits
 
 Built by **Redoyanul Haque** and **Debmalya Dutta Teertha**.
-Data: Open-Meteo · NASA POWER / EONET · GDACS · OpenStreetMap · CARTO.
+Data: Open-Meteo (no key) · NASA POWER / EONET (no key) · GDACS flood feed · OpenStreetMap · CARTO.
+
+Google FloodHub has no keyless API — it needs a Google Maps Platform key with billing on it. The card-free equivalent used here is the Open-Meteo Flood API (river discharge) blended with NASA POWER rainfall.

@@ -307,7 +307,13 @@ export default function App() {
     [points]
   );
 
-  const alertZoneCount = useMemo(() => points.filter((point) => point.risk_score >= 68).length, [points]);
+  // 68 is where the backend risk model switches a zone from "moderate" to
+  // "high" (see risk_level() in backend/app/main.py), so this is the alert cut.
+  const HIGH_RISK_SCORE = 68;
+  const alertZoneCount = useMemo(
+    () => points.filter((point) => point.risk_score >= HIGH_RISK_SCORE).length,
+    [points]
+  );
 
   const dataLooksEmpty = useMemo(() => {
     if (!points.length) return true;
@@ -321,7 +327,9 @@ export default function App() {
   const liveSourceCount = useMemo(() => {
     if (!upstreamStatus) return 0;
     return [
-      upstreamStatus.open_meteo.live || upstreamStatus.openweather_forecast_fallback.live,
+      upstreamStatus.open_meteo.live ||
+        upstreamStatus.openweather_forecast_fallback.live ||
+        Boolean(upstreamStatus.nasa_forecast_fallback?.live),
       upstreamStatus.nasa_power.live,
       upstreamStatus.open_meteo_flood.live,
       upstreamStatus.ai?.live
@@ -333,7 +341,11 @@ export default function App() {
       {
         key: "open_meteo",
         label: "Open-Meteo",
-        live: Boolean(upstreamStatus?.open_meteo.live || upstreamStatus?.openweather_forecast_fallback.live)
+        live: Boolean(
+          upstreamStatus?.open_meteo.live ||
+            upstreamStatus?.openweather_forecast_fallback.live ||
+            upstreamStatus?.nasa_forecast_fallback?.live
+        )
       },
       { key: "nasa", label: "NASA", live: Boolean(upstreamStatus?.nasa_power.live) },
       { key: "river", label: "river", live: Boolean(upstreamStatus?.open_meteo_flood.live) },
@@ -881,16 +893,21 @@ export default function App() {
 
           <article className="kpi-card">
             <div className="kpi-head">
-              <span>Active alert zones</span>
+              <span title="Zones whose risk score has reached the high band">Zones at high risk</span>
               <Bell size={17} />
             </div>
             <div className="kpi-value">
               {kpiSkeleton ? <span className="value-skeleton" /> : alertZoneCount}
-              {kpiSkeleton ? null : <small>high+</small>}
+              {kpiSkeleton ? null : <small>of {points.length} zones</small>}
             </div>
             <div className="kpi-foot">
-              <span className="chip subtle">threshold 68</span>
-              <span>{globalFloodEvents.length} global events</span>
+              <span
+                className="chip subtle"
+                title={`Risk score ${HIGH_RISK_SCORE} and above = high (bands: 0-44 low, 45-67 moderate, 68-83 high, 84-93 severe, 94+ flood)`}
+              >
+                score ≥ {HIGH_RISK_SCORE} · high
+              </span>
+              <span>{globalFloodEvents.length} flood events</span>
             </div>
           </article>
 

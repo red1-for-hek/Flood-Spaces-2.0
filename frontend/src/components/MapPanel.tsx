@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import maplibregl, { Map } from "maplibre-gl";
 import type { GlobalFloodEvent, RiskPoint } from "../types";
 import { supportsWebgl2 } from "../lib/webgl";
+import bangladeshOutline from "../data/bangladesh.geo.json";
 
 type MapMode = "risk" | "rain" | "wind";
 
@@ -876,11 +877,21 @@ export default function MapPanel({
     [districtRenderData, upazilaIndicatorData]
   );
 
+  const effectiveBoundary = useMemo(() => {
+    const live = countryBoundary as { features?: unknown[] } | null;
+    if (live && Array.isArray(live.features) && live.features.length) {
+      return countryBoundary;
+    }
+    // Bundled simplified outline (Natural Earth / world-atlas, 612 points).
+    // Guarantees the country grid renders even when /api/boundaries is blocked.
+    return { type: "Feature", properties: {}, geometry: bangladeshOutline } as Record<string, unknown>;
+  }, [countryBoundary]);
+
   const hexData = useMemo(() => {
     const reference = [...points, ...densePoints];
-    const grid = buildCountryHexGrid(countryBoundary, reference, mode, 16);
+    const grid = buildCountryHexGrid(effectiveBoundary, reference, mode, 16);
     return grid.features.length ? grid : buildHexData(districtRenderData);
-  }, [countryBoundary, densePoints, districtRenderData, mode, points]);
+  }, [densePoints, districtRenderData, effectiveBoundary, mode, points]);
 
   const highlightData = useMemo(
     () => ({
@@ -1179,7 +1190,7 @@ export default function MapPanel({
           "fill-opacity": [
             "case",
             ["==", ["get", "is_no_data"], true],
-            0.05,
+            0.16,
             ["interpolate", ["linear"], ["get", "risk_score"], 0, 0.2, 40, 0.34, 70, 0.52, 100, 0.66]
           ]
         }

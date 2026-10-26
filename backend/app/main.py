@@ -230,6 +230,66 @@ def empty_geojson() -> Dict:
     return {"type": "FeatureCollection", "features": []}
 
 
+def build_nasa_fallback_payload(nasa_meta: Dict) -> Dict | None:
+    """Turn NASA POWER daily rainfall into a forecast-shaped payload.
+
+    When a host cannot reach Open-Meteo at all (blocked egress, DNS, rate
+    limit) the dashboard used to fall back to 30 days of zeros and the map went
+    transparent. NASA POWER observations are real measurements, so shaping them
+    into the hourly/daily structure keeps the risk grid — and the Telegram
+    alerts — meaningful during a forecast outage.
+    """
+    series = nasa_meta.get("series") if isinstance(nasa_meta, dict) else None
+    if not isinstance(series, list) or len(series) < 3:
+        return None
+
+    days: List[str] = []
+    daily_mm: List[float] = []
+    for row in series[-14:]:
+        try:
+            day, value = str(row[0]), float(row[1])
+        except Exception:
+            continue
+        if not day or len(day) != 8:
+            continue
+        days.append(f"{day[:4]}-{day[4:6]}-{day[6:]}")
+        daily_mm.append(max(0.0, min(value, 400.0)))
+
+    if len(days) < 3:
+        return None
+
+    # Spread each observation across its own 24 hours, then pad the forecast
+    # horizon with zeros (unknown future) so the outlook chart still renders.
+    hourly: List[float] = []
+    for value in daily_mm:
+        hourly.extend([round(value / 24.0, 4)] * 24)
+    hourly.extend([0.0] * (24 * 15))
+
+    horizon = min(MONTHLY_FORECAST_DAYS, len(days))
+    return {
+        "hourly": {
+            "time": [],
+            "precipitation": hourly,
+            "wind_speed_10m": [16.0] * len(hourly),
+        },
+        "daily": {
+            "time": days + [
+                (datetime.now(timezone.utc).date() + timedelta(days=offset)).isoformat()
+                for offset in range(1, MONTHLY_FORECAST_DAYS - horizon + 1)
+            ][: max(0, MONTHLY_FORECAST_DAYS - horizon)],
+            "precipitation_sum": (daily_mm + [0.0] * MONTHLY_FORECAST_DAYS)[:MONTHLY_FORECAST_DAYS],
+            "temperature_2m_max": [30.0] * MONTHLY_FORECAST_DAYS,
+            "wind_speed_10m_max": [18.0] * MONTHLY_FORECAST_DAYS,
+        },
+        "_meta": {
+            "live": True,
+            "source": "nasa-power-fallback",
+            "degraded": True,
+            "note": "Open-Meteo unreachable — risk derived from NASA POWER satellite rainfall",
+        },
+    }
+
+
 def build_default_payload() -> Dict:
     base_day = datetime.now(timezone.utc).date()
     days = [(base_day + timedelta(days=offset)).isoformat() for offset in range(MONTHLY_FORECAST_DAYS)]
@@ -442,6 +502,7 @@ def normalize_source_status(payload_meta: Dict, nasa_meta: Dict, river_meta: Dic
         "forecast_source": forecast_source,
         "open_meteo_live": forecast_source == "open-meteo",
         "openweather_forecast_fallback_live": forecast_source == "openweather-forecast-fallback",
+        "nasa_fallback_live": forecast_source == "nasa-power-fallback",
         "nasa_live": bool(nasa_meta.get("live", False)),
         "nasa_observed_day": nasa_meta.get("observed_day"),
         "river_live": bool(river_meta.get("live", False)),
@@ -460,6 +521,7 @@ def summarize_source_health(items: List[Dict]) -> Dict:
         "forecast_live_pct": pct("forecast_live"),
         "open_meteo_live_pct": pct("open_meteo_live"),
         "openweather_fallback_pct": pct("openweather_forecast_fallback_live"),
+        "nasa_fallback_pct": pct("nasa_fallback_live"),
         "nasa_live_pct": pct("nasa_live"),
         "river_live_pct": pct("river_live"),
         "temperature_live_pct": pct("temp_live"),
@@ -1137,7 +1199,9 @@ OPEN_METEO_FORECAST_URL = os.getenv("OPEN_METEO_FORECAST_URL", "https://api.open
 OPEN_METEO_FLOOD_URL = os.getenv("OPEN_METEO_FLOOD_URL", "https://flood-api.open-meteo.com/v1/flood")
 NASA_POWER_URL = os.getenv("NASA_POWER_URL", "https://power.larc.nasa.gov/api/temporal/daily/point")
 NASA_EONET_URL = os.getenv("NASA_EONET_URL", "https://eonet.gsfc.nasa.gov/api/v3/events")
-GDACS_URL = os.getenv("GDACS_URL", "https://www.gdacs.org/xml/rss.xml")
+# Flood-only feed. The generic rss.xml carries every disaster type (earthquakes,
+# volcanoes, cyclones…) and produced "220 global events" in the dashboard.
+GDACS_URL = os.getenv("GDACS_URL", "https://www.gdacs.org/xml/rss_fl_7d.xml")
 
 
 async def fetch_open_meteo(lat: float, lon: float) -> Dict:
@@ -1262,6 +1326,7 @@ async def fetch_nasa_power_precip(lat: float, lon: float) -> Dict:
                 "live": True,
                 "source": "nasa-power",
                 "observed_day": valid_rows[-1][0],
+                "series": [[day, round(value, 2)] for day, value in valid_rows],
             }
         except Exception as exc:
             if attempt == 2:
@@ -1344,27 +1409,40 @@ async def fetch_open_meteo_river_discharge(lat: float, lon: float) -> Dict:
     }
 
 
-async def fetch_open_meteo_batch(
-    coords: List[Tuple[float, float]],
-) -> List[Dict | None]:
-    """Fetch the forecast for many points in a single request.
+OPEN_METEO_API_KEY = os.getenv("OPEN_METEO_API_KEY", "").strip()
+# Commercial/customer endpoint when a key is present; the free endpoint otherwise.
+OPEN_METEO_AUTH = {"apikey": OPEN_METEO_API_KEY} if OPEN_METEO_API_KEY else {}
+BATCH_CHUNK = 8
 
-    Open-Meteo accepts comma-separated latitude/longitude lists, so 16 cities
-    cost one round trip instead of 16. On small instances (Render free = 0.1
-    CPU) the per-city fan-out used to blow the 22 s budget and every city
-    silently fell back to zeros; batching removes that failure mode.
-    """
-    if not coords:
-        return []
 
-    headers = {"User-Agent": "Flood-Spaces/1.0"}
+def _with_key(params: Dict, client_host_url: str) -> Tuple[str, Dict]:
+    """Attach the optional Open-Meteo API key and pick the matching host."""
+    if not OPEN_METEO_API_KEY:
+        return client_host_url, params
+    url = client_host_url.replace("https://api.open-meteo.com", "https://customer-api.open-meteo.com")
+    url = url.replace("https://flood-api.open-meteo.com", "https://customer-flood-api.open-meteo.com")
+    return url, {**params, **OPEN_METEO_AUTH}
+
+
+def _payload_from_row(row: object) -> Dict | None:
+    if isinstance(row, dict) and row.get("hourly"):
+        row["_meta"] = {
+            "live": True,
+            "source": "open-meteo",
+            "forecast_days": len(row.get("daily", {}).get("time", [])),
+        }
+        return row
+    return None
+
+
+async def _fetch_forecast_chunk(coords: List[Tuple[float, float]]) -> List[Dict | None]:
     lats = ",".join(f"{lat:.4f}" for lat, _ in coords)
     lons = ",".join(f"{lon:.4f}" for _, lon in coords)
+    headers = {"User-Agent": "Flood-Spaces/1.0"}
 
-    if circuit_open("open_meteo"):
-        return [None] * len(coords)
-
-    for forecast_days in (MONTHLY_FORECAST_DAYS, 16, 7):
+    # 16 days is the maximum the forecast API serves; 30 always answers 400 and
+    # only burns a round trip (and rate-limit budget).
+    for forecast_days in (16, 7):
         params = {
             "latitude": lats,
             "longitude": lons,
@@ -1373,48 +1451,89 @@ async def fetch_open_meteo_batch(
             "forecast_days": forecast_days,
             "timezone": "auto",
         }
+        url, final_params = _with_key(params, OPEN_METEO_FORECAST_URL)
         try:
             async with httpx.AsyncClient(timeout=25, headers=headers) as client:
-                response = await client.get(OPEN_METEO_FORECAST_URL, params=params)
+                response = await client.get(url, params=final_params)
                 response.raise_for_status()
                 data = response.json()
         except Exception as exc:
-            logger.warning("Open-Meteo batch failed (%s days): %s", forecast_days, safe_error_message(exc))
+            logger.warning(
+                "Open-Meteo forecast chunk failed (%s pts, %s days): %s",
+                len(coords),
+                forecast_days,
+                safe_error_message(exc),
+            )
             continue
 
         rows = data if isinstance(data, list) else [data]
         if len(rows) != len(coords):
-            logger.warning(
-                "Open-Meteo batch returned %s rows for %s points", len(rows), len(coords)
-            )
+            logger.warning("Open-Meteo returned %s rows for %s points", len(rows), len(coords))
             continue
 
-        payloads: List[Dict | None] = []
-        for row in rows:
-            if isinstance(row, dict) and row.get("hourly"):
-                row["_meta"] = {
-                    "live": True,
-                    "source": "open-meteo",
-                    "forecast_days": len(row.get("daily", {}).get("time", [])),
-                }
-                payloads.append(row)
-            else:
-                payloads.append(None)
-
+        payloads = [_payload_from_row(row) for row in rows]
         if any(payloads):
-            reset_circuit("open_meteo")
             return payloads
 
-    trip_circuit("open_meteo")
     return [None] * len(coords)
 
 
-async def fetch_open_meteo_river_batch(coords: List[Tuple[float, float]]) -> List[Dict | None]:
-    """River discharge for many points in one Open-Meteo Flood API request."""
+async def fetch_open_meteo_quick(lat: float, lon: float) -> Dict | None:
+    """One single-point attempt for the per-city rescue path.
+
+    The full fetch_open_meteo() helper is deliberately stubborn (3 attempts x 3
+    horizons + OpenWeather fallback) because it serves interactive requests.
+    Rescuing 16 grid points with that would blow the build budget, so the grid
+    uses this one-shot variant and lets NASA cover whatever is still missing.
+    """
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "hourly": "precipitation,wind_speed_10m",
+        "daily": "precipitation_sum,temperature_2m_max,wind_speed_10m_max",
+        "forecast_days": 16,
+        "timezone": "auto",
+    }
+    url, final_params = _with_key(params, OPEN_METEO_FORECAST_URL)
+    try:
+        async with httpx.AsyncClient(timeout=12, headers={"User-Agent": "Flood-Spaces/1.0"}) as client:
+            response = await client.get(url, params=final_params)
+            response.raise_for_status()
+            payload = response.json()
+    except Exception:
+        return None
+
+    row = payload[0] if isinstance(payload, list) and payload else payload
+    return _payload_from_row(row)
+
+
+async def fetch_open_meteo_batch(coords: List[Tuple[float, float]]) -> List[Dict | None]:
+    """Forecast for many points, in chunks, with a per-point fallback.
+
+    Open-Meteo accepts comma-separated coordinates (up to 1000 per call), so 16
+    cities normally cost two small requests instead of sixteen. Multi-location
+    calls are heavier per request, and a single bad chunk used to zero the whole
+    grid; chunking bounds that blast radius, and the caller retries any missing
+    points individually.
+    """
     if not coords:
         return []
 
-    headers = {"User-Agent": "Flood-Spaces/1.0"}
+    if circuit_open("open_meteo"):
+        return [None] * len(coords)
+
+    chunks = [coords[i : i + BATCH_CHUNK] for i in range(0, len(coords), BATCH_CHUNK)]
+    results = await asyncio.gather(*[_fetch_forecast_chunk(chunk) for chunk in chunks])
+    payloads: List[Dict | None] = [item for chunk in results for item in chunk]
+
+    if any(payloads):
+        reset_circuit("open_meteo")
+    else:
+        trip_circuit("open_meteo")
+    return payloads
+
+
+async def _fetch_flood_chunk(coords: List[Tuple[float, float]]) -> List[Dict | None]:
     lats = ",".join(f"{lat:.4f}" for lat, _ in coords)
     lons = ",".join(f"{lon:.4f}" for _, lon in coords)
     params = {
@@ -1424,36 +1543,48 @@ async def fetch_open_meteo_river_batch(coords: List[Tuple[float, float]]) -> Lis
         "forecast_days": 2,
         "timezone": "auto",
     }
-
-    if circuit_open("river"):
-        return [None] * len(coords)
+    url, final_params = _with_key(params, OPEN_METEO_FLOOD_URL)
+    headers = {"User-Agent": "Flood-Spaces/1.0"}
 
     try:
         async with httpx.AsyncClient(timeout=20, headers=headers) as client:
-            response = await client.get(OPEN_METEO_FLOOD_URL, params=params)
+            response = await client.get(url, params=final_params)
             response.raise_for_status()
             data = response.json()
     except Exception as exc:
-        logger.warning("Flood API batch failed: %s", safe_error_message(exc))
-        trip_circuit("river")
+        logger.warning("Flood chunk failed (%s pts): %s", len(coords), safe_error_message(exc))
         return [None] * len(coords)
 
     rows = data if isinstance(data, list) else [data]
     if len(rows) != len(coords):
-        logger.warning("Flood API batch returned %s rows for %s points", len(rows), len(coords))
         return [None] * len(coords)
 
     metas: List[Dict | None] = []
     for row in rows:
         values = (row or {}).get("daily", {}).get("river_discharge_max", []) if isinstance(row, dict) else []
         value = values[0] if values else None
-        if value is None:
-            metas.append(None)
-        else:
-            metas.append({"value_m3s": float(value), "live": True, "source": "open-meteo-flood"})
+        metas.append(
+            None if value is None else {"value_m3s": float(value), "live": True, "source": "open-meteo-flood"}
+        )
+    return metas
+
+
+async def fetch_open_meteo_river_batch(coords: List[Tuple[float, float]]) -> List[Dict | None]:
+    """River discharge for many points, chunked, in one round of requests."""
+    if not coords:
+        return []
+
+    if circuit_open("river"):
+        return [None] * len(coords)
+
+    chunks = [coords[i : i + BATCH_CHUNK] for i in range(0, len(coords), BATCH_CHUNK)]
+    results = await asyncio.gather(*[_fetch_flood_chunk(chunk) for chunk in chunks])
+    metas: List[Dict | None] = [item for chunk in results for item in chunk]
 
     if any(metas):
         reset_circuit("river")
+    else:
+        trip_circuit("river")
     return metas
 
 
@@ -1567,6 +1698,11 @@ async def fetch_nasa_eonet_flood_events() -> List[Dict]:
 
         events = []
         for event in payload.get("events", []):
+            categories = event.get("categories", []) if isinstance(event.get("categories", []), list) else []
+            category_ids = {str(cat.get("id", "")).lower() for cat in categories if isinstance(cat, dict)}
+            if category_ids and not any("flood" in cid for cid in category_ids):
+                continue
+
             title = str(event.get("title", "Flood Event")).strip() or "Flood Event"
             geometries = event.get("geometry", []) if isinstance(event.get("geometry", []), list) else []
             if not geometries:
@@ -1685,6 +1821,11 @@ async def fetch_gdacs_flood_events() -> List[Dict]:
             if lat is None or lon is None:
                 continue
 
+            event_type = str(item.findtext("{http://www.gdacs.org}eventtype") or item.findtext("eventtype") or "").strip().upper()
+            is_flood = event_type in {"FL", "FLASH FLOOD"} or "flood" in title.lower()
+            if not is_flood:
+                continue
+
             lowered = title.lower()
             if "red" in lowered or "extreme" in lowered:
                 severity = "emergency"
@@ -1720,7 +1861,7 @@ async def fetch_gdacs_flood_events() -> List[Dict]:
         return []
 
 
-def dedupe_global_events(events: List[Dict], max_items: int = 200) -> List[Dict]:
+def dedupe_global_events(events: List[Dict], max_items: int = 60) -> List[Dict]:
     seen = set()
     deduped: List[Dict] = []
 
@@ -1773,7 +1914,7 @@ async def fetch_global_flood_events() -> List[Dict]:
 
     nasa_events = nasa_rows if isinstance(nasa_rows, list) else []
     gdacs_events = gdacs_rows if isinstance(gdacs_rows, list) else []
-    merged = dedupe_global_events([*nasa_events, *gdacs_events], max_items=220)
+    merged = dedupe_global_events([*nasa_events, *gdacs_events], max_items=60)
 
     global_flood_cache[cache_key] = {"ts": datetime.now(timezone.utc).timestamp(), "data": merged}
     return merged
@@ -2055,7 +2196,11 @@ async def upstream_status() -> Dict:
         None,
     )
 
-    open_meteo_live = pct("open_meteo_live_pct") > 0 or pct("openweather_fallback_pct") > 0
+    open_meteo_live = (
+        pct("open_meteo_live_pct") > 0
+        or pct("openweather_fallback_pct") > 0
+        or pct("nasa_fallback_pct") > 0
+    )
     nasa_live = pct("nasa_live_pct") > 0
     river_live = pct("river_live_pct") > 0
 
@@ -2064,12 +2209,22 @@ async def upstream_status() -> Dict:
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "open_meteo": {
             "live": open_meteo_live,
-            "forecast_source": "open-meteo" if pct("open_meteo_live_pct") > 0 else "unavailable",
+            "forecast_source": (
+                "open-meteo"
+                if pct("open_meteo_live_pct") > 0
+                else "nasa-power-fallback"
+                if pct("nasa_fallback_pct") > 0
+                else "unavailable"
+            ),
             "coverage_pct": pct("open_meteo_live_pct"),
             "reason": None if open_meteo_live else "no_live_forecast_in_grid",
         },
         "openweather_forecast_fallback": {
             "live": pct("openweather_fallback_pct") > 0,
+        },
+        "nasa_forecast_fallback": {
+            "live": pct("nasa_fallback_pct") > 0,
+            "coverage_pct": pct("nasa_fallback_pct"),
         },
         "nasa_power": {
             "live": nasa_live,
@@ -2261,22 +2416,96 @@ async def build_risk_grid(force: bool = False) -> Dict:
     while len(nasa_rows) < len(coords):
         nasa_rows.append(None)
 
+    forecast_live_count = sum(1 for row in forecast_rows if row and row.get("_meta", {}).get("live"))
+    if forecast_live_count < len(coords) * 0.6 and not circuit_open("nasa"):
+        # Emergency coverage: the forecast API is largely unreachable, so the
+        # six enrichment points are not enough — pull satellite rainfall for
+        # every city the forecast could not cover and let it carry the grid.
+        gap_indexes = [
+            index
+            for index in range(len(coords))
+            if not (forecast_rows[index] and forecast_rows[index].get("_meta", {}).get("live"))
+            and not nasa_rows[index]
+        ]
+
+        async def fill(index: int) -> None:
+            try:
+                meta = await asyncio.wait_for(
+                    fetch_nasa_power_precip(coords[index][0], coords[index][1]), timeout=10
+                )
+            except Exception:
+                meta = None
+            if meta and meta.get("live"):
+                nasa_rows[index] = meta
+
+        if gap_indexes:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*(fill(index) for index in gap_indexes)), timeout=20
+                )
+            except Exception:
+                pass
+            logger.warning(
+                "Forecast covered %s/%s cities; NASA filled %s gaps",
+                forecast_live_count,
+                len(coords),
+                sum(1 for index in gap_indexes if nasa_rows[index]),
+            )
+
+    # Any point the batch missed (bad chunk, rate limit, one bad coordinate) is
+    # rescued individually with bounded concurrency. This is the path that keeps
+    # the map alive when multi-location calls are rejected but single calls work.
+    missing_indexes = [i for i, row in enumerate(forecast_rows) if not row]
+    if missing_indexes:
+        semaphore = asyncio.Semaphore(4)
+
+        async def rescue(index: int) -> None:
+            async with semaphore:
+                city = CITY_SEEDS[index]
+                try:
+                    row = await asyncio.wait_for(
+                        fetch_open_meteo_quick(city["lat"], city["lon"]), timeout=15
+                    )
+                except Exception:
+                    row = None
+                # fetch_open_meteo() returns a zero-filled default payload when
+                # every attempt fails; only keep genuinely live data.
+                if row and row.get("hourly") and row.get("_meta", {}).get("live"):
+                    forecast_rows[index] = row
+
+        await asyncio.gather(*(rescue(index) for index in missing_indexes), return_exceptions=True)
+        live_rescued = sum(1 for i in missing_indexes if forecast_rows[i])
+        if live_rescued:
+            logger.info("Rescued %s/%s cities with single-point forecast calls", live_rescued, len(missing_indexes))
+
+    missing_rivers = [i for i, row in enumerate(river_rows) if not row]
+    if missing_rivers and any(river_rows):
+        for index in missing_rivers:
+            city = CITY_SEEDS[index]
+            try:
+                row = await asyncio.wait_for(
+                    fetch_open_meteo_river_discharge(city["lat"], city["lon"]), timeout=15
+                )
+            except Exception:
+                row = None
+            if row and row.get("live"):
+                river_rows[index] = row
+
     results: List[Dict] = []
     for index, city in enumerate(CITY_SEEDS):
         forecast = forecast_rows[index] if index < len(forecast_rows) else None
         river = river_rows[index] if index < len(river_rows) else None
         nasa = nasa_rows[index] if index < len(nasa_rows) else None
 
-        if not forecast and any(forecast_rows):
-            # Only a few cities were missing from an otherwise good batch —
-            # retry those individually. If the whole batch failed, retrying 16
-            # points would multiply the outage by 16; use the snapshot instead.
-            try:
-                forecast = await asyncio.wait_for(fetch_open_meteo(city["lat"], city["lon"]), timeout=15)
-            except Exception:
-                forecast = None
-
-        payload = forecast if forecast and forecast.get("hourly") else build_default_payload()
+        payload = (
+            forecast
+            if forecast and forecast.get("hourly") and forecast.get("_meta", {}).get("live")
+            else None
+        )
+        if payload is None and nasa and nasa.get("live"):
+            payload = build_nasa_fallback_payload(nasa) or build_default_payload()
+        if payload is None:
+            payload = build_default_payload()
         payload_meta = payload.get("_meta", {})
         nasa_meta = nasa or {
             "value_mm": 0.0,
@@ -2362,6 +2591,9 @@ async def build_risk_grid(force: bool = False) -> Dict:
 
     cache_ttl = 600 if live_count >= max(4, len(results) // 3) else 60
     grid_cache[cache_key] = {"ts": datetime.now(timezone.utc).timestamp(), "ttl": cache_ttl, "data": data}
+    # A rebuilt grid invalidates the derived health report, otherwise the KPI
+    # could keep showing the previous state for up to three minutes.
+    source_status_cache.pop("upstream-status", None)
     risk_grid_meta.update(
         {
             "last_success_at": data["computed_at"],

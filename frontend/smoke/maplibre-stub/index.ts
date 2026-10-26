@@ -16,8 +16,17 @@ export class Map {
     this.layers.push(layer);
     (globalThis as Record<string, unknown>).__maplibreLayers = this.layers;
   }
-  getSource() {
-    return { setData: () => {}, setTiles: () => {} };
+  getSource(id?: string) {
+    return {
+      setData: (data: unknown) => {
+        const store = ((globalThis as Record<string, unknown>).__maplibreSourceData ||= {}) as Record<
+          string,
+          unknown
+        >;
+        store[String(id)] = data;
+      },
+      setTiles: () => {}
+    };
   }
   getLayer() {
     return {};
